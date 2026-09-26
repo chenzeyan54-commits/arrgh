@@ -118,6 +118,7 @@ Framework: plain `#[test]`/`#[tokio::test]` inline in the module under test. Run
 | `downloader.rs` | Background worker: cbz/text download, multi-source priority fallback, `"downloading"` status while in flight, error messages include the failing URL, User-Agent header sent |
 | `settings.rs`, `sources.rs` | KV settings CRUD + validation, source list/patch/delete, seeded bundled-source content types |
 | `discover.rs` (Royal Road, spec 019) | Royal Road leg in search results, leg failure non-fatal, NovelUpdates wins dedup, add stores `metadata_source=royalroad` + author from plugin meta + text chapters numbered by real number, no Sync Warning when Royal Road has no match (FR-009), web-shaped add body (`mangaupdates_id` + non-MU `source`) never stored as / deduped against a MangaUpdates id ✅ |
+| `chapter_sync.rs` (#173) | re-sync replaces a chapter's stale source_id when the source now reports a different one for the same chapter ✅ |
 | `chapter_sync.rs` (spec 030) | re-sync with a renumbered source chapter moves the existing row (progress kept); stale duplicate from the old numbering removed; downloaded duplicate kept ✅ |
 | `discover.rs` (live progress, spec 021) | `GET /api/discover/stream`: `sources` first (6 for members, nhentai 7th only for explicit users), one `source` event per leg, `done` last; timed-out leg → `status:"timeout"` while others still return; all legs failed → every event `error` + `done.ok=false`; 401 without token; a fast source's event arrives before a slow source finishes (incremental body read); last event's `results` == the one-shot response; one-shot `GET /api/discover` bounded by the same per-source timeout (all hung → 502 promptly); shared HTTP client sends a default User-Agent (MangaDex 400s without one); NovelUpdates description passed through (spec 029) ✅ |
 | `schema_bootstrap.rs` (spec 019) | Migration 0004 restores the royalroad source row on existing installs, no-op on empty table, idempotent ✅ |
@@ -202,7 +203,7 @@ HTML/JSON fixture tests for scraping logic. Each plugin tested with mocked respo
 |---|---|---|
 | mangafire | search shape + field values, manhwa type, chapters w/ numbers, pages URLs | ✅ |
 | asurascans | search shape + slug extraction, status normalization, chapters, pages | ✅ |
-| wuxiaworld | search shape + API mapping, chapters returns all from chapterGroups (count, ch1 real slug, ch2+ numeric source_id, volume from group order, empty fallback), chapterText extraction | ✅ |
+| wuxiaworld | search shape + API mapping; chapters via GetChapterList gRPC-web (real slugs for every chapter, number = novel position, volume = group order, request frame, Karma-locked chapters skipped, API failure throws, empty page → []); chapterText extraction, empty CSR shell throws, teaser (locked) page throws — live fixtures 2026-09-26 (#173) | ✅ |
 | manga18fx | search shape + slug extraction, chapters with numbers, pages URLs | ✅ |
 | manga18fx | chapters — sidebar/popular chapter links from other series NOT included (contamination regression) | ✅ |
 | manga18fx | search URL is `/search?q=` not `/?s=` (WordPress fallback regression) | ✅ |

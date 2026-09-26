@@ -565,3 +565,30 @@ async fn sync_keeps_a_stale_duplicate_that_was_downloaded() {
         .collect();
     assert_eq!(nums, vec![2.0, 2.1, 2.31]);
 }
+
+/// GH #173: WuxiaWorld used to store guessed ids ("novel/chapter/2") that never
+/// load; it now reports the real slug for the same chapter. Re-sync must replace
+/// the stale link, or the downloader keeps hitting the dead URL.
+#[tokio::test]
+async fn sync_updates_a_changed_source_id_for_the_same_chapter() {
+    const JSON: &str =
+        r#"[{"source_id":"issth/issth-book-1-chapter-2","number":2.0,"title":"Chapter 2"}]"#;
+    let state = setup(JSON, false).await;
+    let admin = common::seed_user(&state, "admin", "admin", true).await;
+    let t = common::seed_title(&state, "ISSTH", false).await;
+    common::seed_user_title(&state, &admin.id, &t).await;
+    common::add_title_source(&state, &t, "wuxiaworld").await;
+    let ch = common::seed_chapter(&state, &t, 2.0, false).await;
+    common::add_chapter_source_id(&state, &ch, "wuxiaworld", "issth/chapter/2").await;
+
+    sync_now(&state, &admin, &t).await;
+
+    let ids: Vec<String> = sqlx::query_scalar(
+        "SELECT cs.source_id FROM chapter_sources cs JOIN chapters c ON c.id = cs.chapter_id WHERE c.title_id = ?",
+    )
+    .bind(&t)
+    .fetch_all(&state.db)
+    .await
+    .unwrap();
+    assert_eq!(ids, vec!["issth/issth-book-1-chapter-2".to_string()]);
+}

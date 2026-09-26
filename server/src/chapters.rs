@@ -342,7 +342,22 @@ pub async fn sync_from_source(
         if src_id.is_empty() {
             continue;
         }
-        if existing_pairs.contains(chapter_id) || !seen_this_batch.insert(chapter_id.clone()) {
+        if !seen_this_batch.insert(chapter_id.clone()) {
+            continue;
+        }
+        if existing_pairs.contains(chapter_id) {
+            // The source may now report a different id for the same chapter (e.g.
+            // WuxiaWorld's real slug replacing a guessed one, GH #173) — keep the
+            // link current so the downloader uses what the source actually serves.
+            sqlx::query(
+                "UPDATE chapter_sources SET source_id = ? WHERE chapter_id = ? AND source = ? AND source_id <> ?",
+            )
+            .bind(src_id)
+            .bind(chapter_id)
+            .bind(source)
+            .bind(src_id)
+            .execute(pool)
+            .await?;
             continue;
         }
 
