@@ -48,6 +48,7 @@ Open `http://<your-server-ip>:8282`. The setup wizard runs on first launch.
 | `LANGUAGES` | `en` | Comma-separated language codes for chapter filtering |
 | `CLOAKBROWSER_WS_URL` | `http://cloakbrowser:3000` | CloakBrowser CDP endpoint for CF-protected plugins |
 | `COMMUNITY_BUNDLES_DIR` | `/community-bundles` | Where user-installed plugin bundles are persisted |
+| `PLUGIN_CALL_TIMEOUT_MS` | `180000` | Max time one plugin call may take before the host answers `504` |
 
 ### `cloakbrowser`
 

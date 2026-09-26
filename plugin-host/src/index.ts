@@ -9,6 +9,22 @@ const BUNDLES_DIR = process.env.BUNDLES_DIR ?? path.join(__dirname, '..', 'bundl
 const COMMUNITY_BUNDLES_DIR = process.env.COMMUNITY_BUNDLES_DIR ?? path.join(__dirname, '..', 'community-bundles')
 const LANGS = (process.env.LANGUAGES ?? 'en').split(',').map((s) => s.trim()).filter(Boolean)
 const CLOAKBROWSER_WS_URL = process.env.CLOAKBROWSER_WS_URL ?? ''
+// Upper bound on one plugin call. Generous: a long novel's chapter list can page for a while.
+const PLUGIN_CALL_TIMEOUT_MS = parseInt(process.env.PLUGIN_CALL_TIMEOUT_MS ?? '180000', 10)
+
+class PluginTimeoutError extends Error {}
+
+// ponytail: stops waiting, doesn't cancel — the plugin API has no AbortSignal, so a hung
+// fetch/CDP call keeps running in the background. Thread a signal through if that leaks.
+function withTimeout<T>(call: Promise<T>, ms: number, what: string): Promise<T> {
+  let timer: NodeJS.Timeout | undefined
+  const deadline = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new PluginTimeoutError(`${what} timed out after ${ms}ms`)), ms)
+  })
+  return Promise.race([call, deadline]).finally(() => clearTimeout(timer))
+}
+
+const errorStatus = (e: unknown) => (e instanceof PluginTimeoutError ? 504 : 502)
 
 // ── CloakBrowser connection ───────────────────────────────────────────────────
 
@@ -155,8 +171,11 @@ function watchBundles(): void {
 export function createApp(
   registry: Map<string, PluginBundle>,
   communityPluginIds: Set<string> = new Set(),
+  { callTimeoutMs = PLUGIN_CALL_TIMEOUT_MS }: { callTimeoutMs?: number } = {},
 ): express.Application {
   const app = express()
+  const call = <T>(req: express.Request, fn: string, work: Promise<T>) =>
+    withTimeout(work, callTimeoutMs, `${req.params.plugin} ${fn}`)
   app.use(express.json())
 
   function getPlugin(id: string, res: express.Response): PluginBundle | null {
@@ -232,10 +251,10 @@ export function createApp(
     const q = String(req.query['q'] ?? '').trim()
     if (!q) return void res.json([])
     try {
-      res.json(await p.search(q))
+      res.json(await call(req, 'search', p.search(q)))
     } catch (e) {
       console.error(`[${req.params.plugin}] search error:`, e)
-      res.status(502).json({ error: String(e) })
+      res.status(errorStatus(e)).json({ error: String(e) })
     }
   })
 
@@ -244,10 +263,10 @@ export function createApp(
     if (!p) return
     if (!p.trending) return void res.status(404).json({ error: 'trending not supported' })
     try {
-      res.json(await p.trending())
+      res.json(await call(req, 'trending', p.trending()))
     } catch (e) {
       console.error(`[${req.params.plugin}] trending error:`, e)
-      res.status(502).json({ error: String(e) })
+      res.status(errorStatus(e)).json({ error: String(e) })
     }
   })
 
@@ -256,10 +275,10 @@ export function createApp(
     if (!p) return
     if (!p.meta) return void res.status(404).json({ error: 'meta not supported' })
     try {
-      res.json(await p.meta(decodeURIComponent(req.params.id), LANGS))
+      res.json(await call(req, 'meta', p.meta(decodeURIComponent(req.params.id), LANGS)))
     } catch (e) {
       console.error(`[${req.params.plugin}] meta error:`, e)
-      res.status(502).json({ error: String(e) })
+      res.status(errorStatus(e)).json({ error: String(e) })
     }
   })
 
@@ -267,10 +286,10 @@ export function createApp(
     const p = getPlugin(req.params.plugin, res)
     if (!p) return
     try {
-      res.json(await p.chapters(decodeURIComponent(req.params.id), LANGS))
+      res.json(await call(req, 'chapters', p.chapters(decodeURIComponent(req.params.id), LANGS)))
     } catch (e) {
       console.error(`[${req.params.plugin}] chapters error:`, e)
-      res.status(502).json({ error: String(e) })
+      res.status(errorStatus(e)).json({ error: String(e) })
     }
   })
 
@@ -279,10 +298,10 @@ export function createApp(
     if (!p) return
     if (!p.pages) return void res.status(404).json({ error: 'pages not supported by this plugin' })
     try {
-      res.json(await p.pages(decodeURIComponent(req.params.id)))
+      res.json(await call(req, 'pages', p.pages(decodeURIComponent(req.params.id))))
     } catch (e) {
       console.error(`[${req.params.plugin}] pages error:`, e)
-      res.status(502).json({ error: String(e) })
+      res.status(errorStatus(e)).json({ error: String(e) })
     }
   })
 
@@ -291,10 +310,11 @@ export function createApp(
     if (!p) return
     if (!p.chapterText) return void res.status(404).json({ error: 'chapter text not supported by this plugin' })
     try {
-      res.type('text/plain').send(await p.chapterText(decodeURIComponent(req.params.id)))
+      const text = await call(req, 'chapterText', p.chapterText(decodeURIComponent(req.params.id)))
+      res.type('text/plain').send(text)
     } catch (e) {
       console.error(`[${req.params.plugin}] chapter text error:`, e)
-      res.status(502).json({ error: String(e) })
+      res.status(errorStatus(e)).json({ error: String(e) })
     }
   })
 
@@ -305,10 +325,10 @@ export function createApp(
     const url = String(req.query['url'] ?? '')
     if (!url) return void res.status(400).json({ error: 'url query param required' })
     try {
-      const buf = await p.cover(url)
+      const buf = await call(req, 'cover', p.cover(url))
       res.set('Content-Type', 'image/jpeg').send(buf)
     } catch (e) {
-      res.status(502).json({ error: String(e) })
+      res.status(errorStatus(e)).json({ error: String(e) })
     }
   })
 

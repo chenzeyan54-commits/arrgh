@@ -249,3 +249,27 @@ describe('onBundleChange', () => {
     expect(community.has('tmpplugin')).toBe(false)
   })
 })
+
+describe('plugin call timeout (GH #159)', () => {
+  const never = () => new Promise<never>(() => {})
+  const HUNG = makePlugin({
+    info: { id: 'hung', name: 'Hung', default_explicit: false, content_types: ['manga'] },
+    search: vi.fn(never), chapters: vi.fn(never), pages: vi.fn(never),
+    trending: vi.fn(never), meta: vi.fn(never), chapterText: vi.fn(never), cover: vi.fn(never),
+  })
+
+  it.each([
+    '/hung/search?q=x',
+    '/hung/trending',
+    '/hung/manga/m1/meta',
+    '/hung/manga/m1/chapters',
+    '/hung/chapter/c1/pages',
+    '/hung/chapter/c1/text',
+    '/hung/cover?url=https://x/y.jpg',
+  ])('%s returns 504 instead of hanging', async (url) => {
+    const app = createApp(new Map([['hung', HUNG]]), new Set(), { callTimeoutMs: 50 })
+    const res = await request(app).get(url)
+    expect(res.status).toBe(504)
+    expect(res.body.error).toMatch(/timed out after 50ms/)
+  }, 2000)
+})
