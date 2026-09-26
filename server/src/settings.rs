@@ -6,6 +6,18 @@ use std::collections::HashMap;
 
 use sqlx::SqlitePool;
 
+pub const DOWNLOAD_WORKERS: &str = "download_workers";
+pub const DEFAULT_DOWNLOAD_WORKERS: i64 = 2;
+/// Matches the Settings UI stepper (1–10); the API itself accepts any number.
+pub const MAX_DOWNLOAD_WORKERS: i64 = 10;
+
+pub async fn get(pool: &SqlitePool, key: &str) -> sqlx::Result<Option<String>> {
+    sqlx::query_scalar("SELECT value FROM server_settings WHERE key = ?")
+        .bind(key)
+        .fetch_optional(pool)
+        .await
+}
+
 pub async fn get_all(pool: &SqlitePool) -> sqlx::Result<HashMap<String, String>> {
     let rows: Vec<(String, String)> = sqlx::query_as("SELECT key, value FROM server_settings")
         .fetch_all(pool)

@@ -30,7 +30,10 @@ async fn read_settings(state: &AppState) -> AppResult<AppSettingsDto> {
     let get = |k: &str| kv.get(k).map(String::as_str);
 
     Ok(AppSettingsDto {
-        download_workers: settings::parse_long(get("download_workers"), 2),
+        download_workers: settings::parse_long(
+            get(settings::DOWNLOAD_WORKERS),
+            settings::DEFAULT_DOWNLOAD_WORKERS,
+        ),
         index_interval_hours: settings::parse_long(get("index_interval_hours"), 6),
         auto_download: settings::parse_bool(get("auto_download"), false),
         reader_mode: get("reader_mode").unwrap_or("scroll").to_string(),
@@ -68,7 +71,7 @@ async fn save_settings(
     }
 
     if let Some(v) = body.download_workers {
-        settings::set(&state.db, "download_workers", &v.to_string()).await?;
+        settings::set(&state.db, settings::DOWNLOAD_WORKERS, &v.to_string()).await?;
     }
     if let Some(v) = body.index_interval_hours {
         settings::set(&state.db, "index_interval_hours", &v.to_string()).await?;
