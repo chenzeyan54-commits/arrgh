@@ -111,23 +111,37 @@ export async function chapters(fictionId: string): Promise<ChapterResult[]> {
     const title = linkEl.text().trim() || null
     results.push({
       source_id: href.slice(1),  // "fiction/<fid>/<slug>/chapter/<cid>/<slug>"
-      number: chapterNumber(title, href) ?? i + 1,
+      number: chapterNumber(title, href) ?? NaN,  // NaN = unnumbered, resolved below
       title,
       chapter_format: 'text',
     })
   })
 
+  // No numbers anywhere ("Prologue", "The Beginning"…) → plain list position.
+  if (results.every((c) => Number.isNaN(c.number))) return results.map((c, i) => ({ ...c, number: i + 1 }))
+  // Otherwise an unnumbered entry ("Book 5 Recap") sits just after its predecessor
+  // (+0.01) — list position could collide with a real chapter of that number, and
+  // chapters dedup by number.
+  let prev = 0
+  for (const c of results) {
+    if (Number.isNaN(c.number)) c.number = Math.round((prev + 0.01) * 100) / 100
+    prev = c.number
+  }
   return results
 }
 
 // STUB fictions (chapters removed after publishing) keep e.g. 1–8 then 1216+,
 // so position ≠ chapter number. Parse "Chapter 1389" from the title, then the
-// slug ("chapter-1389-antechamber"); position is the caller's fallback.
-const CHAPTER_NUM = /chapter[-\s]*(\d+(?:\.\d+)?)/i
+// slug ("chapter-1389-antechamber"); unnumbered entries are resolved in chapters().
+// Lettered parts ("Chapter 2.A", slug "chapter-2a") → 2.1, 2.2, … so each part
+// stays a distinct chapter.
+const CHAPTER_NUM = /chapter[-\s]*(\d+(?:\.\d+)?)(?:\.?([a-i])\b)?/i
 function chapterNumber(title: string | null, href: string): number | null {
   const slug = href.split('/chapter/')[1]?.split('/')[1] ?? ''
   const m = (title ?? '').match(CHAPTER_NUM) ?? slug.match(CHAPTER_NUM)
-  return m ? Number(m[1]) : null
+  if (!m) return null
+  const part = m[2] ? (m[2].toLowerCase().charCodeAt(0) - 96) / 10 : 0
+  return Math.round((Number(m[1]) + part) * 100) / 100
 }
 
 export async function chapterText(chapterPath: string): Promise<string> {

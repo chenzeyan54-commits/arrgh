@@ -107,19 +107,34 @@ export function parseSearchHtml(html: string): SearchResult[] {
 
 // Titles are "Chapter 41: Clash" / "Chapter 1 - Another Monday Morning"; use the
 // real number so chapters merge correctly with other sources (e.g. Royal Road).
-const CHAPTER_NUM = /chapter[-\s]*(\d+(?:\.\d+)?)/i
+// Lettered parts ("Chapter 2.A") → 2.1, 2.2, … (same rules as the Royal Road plugin).
+const CHAPTER_NUM = /chapter[-\s]*(\d+(?:\.\d+)?)(?:\.?([a-i])\b)?/i
+const round2 = (n: number) => Math.round(n * 100) / 100
+
+function chapterNumber(title: string | null, path: string): number | null {
+  const m = (title ?? '').match(CHAPTER_NUM) ?? path.split('/').pop()!.match(CHAPTER_NUM)
+  if (!m) return null
+  return round2(Number(m[1]) + (m[2] ? (m[2].toLowerCase().charCodeAt(0) - 96) / 10 : 0))
+}
 
 export function parseChapterList(html: string): ChapterResult[] {
   const $ = cheerio.load(`<ul>${html}</ul>`)
   const results: ChapterResult[] = []
-  $('li a[href]').each((i, el) => {
+  $('li a[href]').each((_, el) => {
     const href = $(el).attr('href') ?? ''
     const path = href.replace(/^https?:\/\/[^/]+/, '').replace(/^\//, '')
     if (!path) return
     const title = ($(el).attr('title') ?? $(el).text()).trim() || null
-    const m = (title ?? '').match(CHAPTER_NUM) ?? path.split('/').pop()!.match(CHAPTER_NUM)
-    results.push({ source_id: path, number: m ? Number(m[1]) : i + 1, title, chapter_format: 'text' })
+    results.push({ source_id: path, number: chapterNumber(title, path) ?? NaN, title, chapter_format: 'text' })
   })
+  // No numbers anywhere → list position; otherwise an unnumbered entry sits just
+  // after its predecessor (+0.01) so it can't collide with a real chapter number.
+  if (results.every((c) => Number.isNaN(c.number))) return results.map((c, i) => ({ ...c, number: i + 1 }))
+  let prev = 0
+  for (const c of results) {
+    if (Number.isNaN(c.number)) c.number = round2(prev + 0.01)
+    prev = c.number
+  }
   return results
 }
 

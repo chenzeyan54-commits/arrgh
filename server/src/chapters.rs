@@ -173,6 +173,77 @@ struct PluginChapter {
 ///
 /// Errors (network, non-2xx, bad JSON) propagate — the caller (titles.rs's
 /// sync orchestration) tracks per-source failure and logs it.
+/// A source can renumber a chapter it already reported (e.g. Royal Road
+/// "Chapter 2.A" was 2, now 2.1 — spec 030). Chapters dedup by number, so
+/// without this the old row lingers next to the new one. For each existing
+/// link to one of this source's chapters that now arrives with a different
+/// number: move the row to the new number when that's free (keeps downloads
+/// and reading progress); otherwise it's a stale duplicate — delete it, unless
+/// it's downloaded or another source still links it.
+async fn reconcile_renumbered(
+    pool: &SqlitePool,
+    title_id: &str,
+    source: &str,
+    plugin_chapters: &[PluginChapter],
+) -> anyhow::Result<()> {
+    let reported: HashMap<&str, &PluginChapter> = plugin_chapters
+        .iter()
+        .filter(|pc| pc.number.is_finite())
+        .filter_map(|pc| {
+            let id = pc.source_id.as_deref().or(pc.id.as_deref())?;
+            (!id.is_empty()).then_some((id, pc))
+        })
+        .collect();
+    if reported.is_empty() {
+        return Ok(());
+    }
+
+    let links: Vec<(String, String, f64, bool, i64)> = sqlx::query_as(
+        "SELECT c.id, cs.source_id, c.number, c.downloaded, \
+                (SELECT COUNT(*) FROM chapter_sources x WHERE x.chapter_id = c.id) \
+         FROM chapter_sources cs JOIN chapters c ON c.id = cs.chapter_id \
+         WHERE c.title_id = ? AND cs.source = ?",
+    )
+    .bind(title_id)
+    .bind(source)
+    .fetch_all(pool)
+    .await?;
+    let mut taken: HashSet<u64> =
+        sqlx::query_scalar::<_, f64>("SELECT number FROM chapters WHERE title_id = ?")
+            .bind(title_id)
+            .fetch_all(pool)
+            .await?
+            .into_iter()
+            .map(f64::to_bits)
+            .collect();
+
+    for (chapter_id, source_id, number, downloaded, link_count) in links {
+        let Some(pc) = reported.get(source_id.as_str()) else {
+            continue;
+        };
+        if pc.number == number {
+            continue;
+        }
+        if taken.insert(pc.number.to_bits()) {
+            sqlx::query("UPDATE chapters SET number = ?, title = ? WHERE id = ?")
+                .bind(pc.number)
+                .bind(&pc.title)
+                .bind(&chapter_id)
+                .execute(pool)
+                .await?;
+            taken.remove(&number.to_bits());
+        } else if !downloaded && link_count == 1 {
+            // chapter_sources / read_progress / download_queue cascade.
+            sqlx::query("DELETE FROM chapters WHERE id = ?")
+                .bind(&chapter_id)
+                .execute(pool)
+                .await?;
+            taken.remove(&number.to_bits());
+        }
+    }
+    Ok(())
+}
+
 pub async fn sync_from_source(
     pool: &SqlitePool,
     http: &reqwest::Client,
@@ -203,6 +274,8 @@ pub async fn sync_from_source(
         "pages"
     };
     let now = ef_timestamp_now();
+
+    reconcile_renumbered(pool, title_id, source, &plugin_chapters).await?;
 
     let existing: Vec<(String, f64)> =
         sqlx::query_as("SELECT id, number FROM chapters WHERE title_id = ?")

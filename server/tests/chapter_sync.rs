@@ -452,3 +452,116 @@ async fn sync_logs_zero_chapter_count_when_plugin_returns_empty() {
         .iter()
         .any(|m| m.contains('0') && m.contains("chapter") && m.contains("mangadex")));
 }
+
+// ── renumbered source chapters (spec 030) ─────────────────────────────────
+
+/// The plugin now numbers "Chapter 2.A" as 2.1 and "Book 5 Recap" as 2.31
+/// (it used to report 2 and 5). Same source chapters, new numbers.
+const RENUMBERED_JSON: &str = r#"[
+  {"source_id":"ch-2a","number":2.1,"title":"Chapter 2.A"},
+  {"source_id":"recap","number":2.31,"title":"Book 5 Recap"}
+]"#;
+
+async fn numbers(state: &arrgh_server::state::AppState, t: &str) -> Vec<(f64, Option<String>)> {
+    sqlx::query_as("SELECT number, title FROM chapters WHERE title_id = ? ORDER BY number")
+        .bind(t)
+        .fetch_all(&state.db)
+        .await
+        .unwrap()
+}
+
+async fn sync_now(
+    state: &arrgh_server::state::AppState,
+    admin: &arrgh_server::users::UserRow,
+    t: &str,
+) {
+    let app = arrgh_server::api::router(state.clone());
+    let (status, _) = send(
+        &app,
+        "POST",
+        &format!("/api/titles/{t}/sync"),
+        &common::token_for(admin),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    wait_for_sync_ready(state, t).await;
+}
+
+#[tokio::test]
+async fn sync_renumbers_a_source_chapter_in_place() {
+    let state = setup(RENUMBERED_JSON, false).await;
+    let admin = common::seed_user(&state, "admin", "admin", true).await;
+    let t = common::seed_title(&state, "DCC", false).await;
+    common::seed_user_title(&state, &admin.id, &t).await;
+    common::add_title_source(&state, &t, "royalroad").await;
+    let old_2 = common::seed_chapter(&state, &t, 2.0, false).await;
+    common::add_chapter_source_id(&state, &old_2, "royalroad", "ch-2a").await;
+    common::mark_read(&state, &admin.id, &old_2).await;
+
+    sync_now(&state, &admin, &t).await;
+
+    let nums: Vec<f64> = numbers(&state, &t)
+        .await
+        .into_iter()
+        .map(|(n, _)| n)
+        .collect();
+    assert_eq!(nums, vec![2.1, 2.31]);
+    // Same row (reading progress kept), now at 2.1.
+    let n: f64 = sqlx::query_scalar("SELECT number FROM chapters WHERE id = ?")
+        .bind(&old_2)
+        .fetch_one(&state.db)
+        .await
+        .unwrap();
+    assert_eq!(n, 2.1);
+}
+
+#[tokio::test]
+async fn sync_removes_stale_duplicate_left_by_old_numbering() {
+    let state = setup(RENUMBERED_JSON, false).await;
+    let admin = common::seed_user(&state, "admin", "admin", true).await;
+    let t = common::seed_title(&state, "DCC", false).await;
+    common::seed_user_title(&state, &admin.id, &t).await;
+    common::add_title_source(&state, &t, "royalroad").await;
+    // State after one sync with the new plugin but the old sync code: old rows
+    // at 2 and 5 plus new rows at 2.1 and 2.31, each pair on one source chapter.
+    for (num, src) in [
+        (2.0, "ch-2a"),
+        (5.0, "recap"),
+        (2.1, "ch-2a"),
+        (2.31, "recap"),
+    ] {
+        let c = common::seed_chapter(&state, &t, num, false).await;
+        common::add_chapter_source_id(&state, &c, "royalroad", src).await;
+    }
+
+    sync_now(&state, &admin, &t).await;
+
+    let nums: Vec<f64> = numbers(&state, &t)
+        .await
+        .into_iter()
+        .map(|(n, _)| n)
+        .collect();
+    assert_eq!(nums, vec![2.1, 2.31]);
+}
+
+#[tokio::test]
+async fn sync_keeps_a_stale_duplicate_that_was_downloaded() {
+    let state = setup(RENUMBERED_JSON, false).await;
+    let admin = common::seed_user(&state, "admin", "admin", true).await;
+    let t = common::seed_title(&state, "DCC", false).await;
+    common::seed_user_title(&state, &admin.id, &t).await;
+    common::add_title_source(&state, &t, "royalroad").await;
+    let old = common::seed_chapter(&state, &t, 2.0, true).await; // downloaded
+    common::add_chapter_source_id(&state, &old, "royalroad", "ch-2a").await;
+    let new = common::seed_chapter(&state, &t, 2.1, false).await;
+    common::add_chapter_source_id(&state, &new, "royalroad", "ch-2a").await;
+
+    sync_now(&state, &admin, &t).await;
+
+    let nums: Vec<f64> = numbers(&state, &t)
+        .await
+        .into_iter()
+        .map(|(n, _)| n)
+        .collect();
+    assert_eq!(nums, vec![2.0, 2.1, 2.31]);
+}

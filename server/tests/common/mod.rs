@@ -319,6 +319,25 @@ pub async fn mark_read(state: &AppState, user_id: &str, chapter_id: &str) {
     .unwrap();
 }
 
+/// `add_chapter_source` with an explicit plugin-side `source_id`.
+pub async fn add_chapter_source_id(
+    state: &AppState,
+    chapter_id: &str,
+    source: &str,
+    source_id: &str,
+) {
+    sqlx::query(
+        "INSERT INTO chapter_sources (id, chapter_id, source, source_id) VALUES (?, ?, ?, ?)",
+    )
+    .bind(uuid::Uuid::new_v4().to_string())
+    .bind(chapter_id)
+    .bind(source)
+    .bind(source_id)
+    .execute(&state.db)
+    .await
+    .unwrap();
+}
+
 pub async fn add_chapter_source(state: &AppState, chapter_id: &str, source: &str) {
     sqlx::query(
         "INSERT INTO chapter_sources (id, chapter_id, source, source_id) VALUES (?, ?, ?, ?)",

@@ -693,6 +693,19 @@ const RR_FICTION_UNNUMBERED_HTML = `
 </tbody></table>
 `
 
+// Live 2026-09-26: fiction 29358 (Dungeon Crawler Carl Book 6, a STUB) — its full chapter table.
+const RR_FICTION_LETTERED_HTML = `
+<table id="chapters"><tbody>
+<tr class="chapter-row"><td><a href="/fiction/29358/dungeon-crawler-carl-book-6-the-ghosts-of-earth/chapter/442507/chapter-1">Chapter 1</a></td></tr>
+<tr class="chapter-row"><td><a href="/fiction/29358/dungeon-crawler-carl-book-6-the-ghosts-of-earth/chapter/442714/chapter-2a">Chapter 2.A</a></td></tr>
+<tr class="chapter-row"><td><a href="/fiction/29358/dungeon-crawler-carl-book-6-the-ghosts-of-earth/chapter/442757/chapter-2b">Chapter 2.B</a></td></tr>
+<tr class="chapter-row"><td><a href="/fiction/29358/dungeon-crawler-carl-book-6-the-ghosts-of-earth/chapter/442823/chapter-2c">Chapter 2.C</a></td></tr>
+<tr class="chapter-row"><td><a href="/fiction/29358/dungeon-crawler-carl-book-6-the-ghosts-of-earth/chapter/996461/book-5-recap">Book 5 Recap</a></td></tr>
+<tr class="chapter-row"><td><a href="/fiction/29358/dungeon-crawler-carl-book-6-the-ghosts-of-earth/chapter/996463/book-6-prologue-chapter-198">Book 6, prologue (Chapter 198)</a></td></tr>
+<tr class="chapter-row"><td><a href="/fiction/29358/dungeon-crawler-carl-book-6-the-ghosts-of-earth/chapter/996937/chapter-199">Chapter 199</a></td></tr>
+</tbody></table>
+`
+
 const RR_CHAPTER_HTML = `
 <html><head>
 <style>
@@ -771,6 +784,16 @@ describe('royalroad', () => {
         expect(c.chapter_format).toBe('text')
         expect(c.source_id.startsWith('fiction/36049/')).toBe(true)
       }
+    })
+
+    // Lettered parts ("Chapter 2.A/B/C") used to all parse as 2 and collapse into one
+    // chapter (chapters dedup by number); an unnumbered entry took its list position (5),
+    // which can collide with a real chapter 5. 7 chapters became 5.
+    it('keeps lettered parts and unnumbered entries distinct and in order', async () => {
+      vi.stubGlobal('fetch', mockFetch({ '/fiction/29358': { text: RR_FICTION_LETTERED_HTML } }))
+      const chs = await royalroad.chapters('29358')
+      expect(chs.map((c) => c.number)).toEqual([1, 2.1, 2.2, 2.3, 2.31, 198, 199])
+      expect(new Set(chs.map((c) => c.number)).size).toBe(7)
     })
 
     it('falls back to 1-based position when no number parses', async () => {
@@ -1059,9 +1082,15 @@ describe('novelfullnet — parsers (live captures)', () => {
     })
   })
 
-  it('parseChapterList: falls back to position when a title has no number', () => {
-    const html = '<li><a href="/x/prologue.html" title="Prologue">Prologue</a></li><li><a href="/x/chapter-2-b.html" title="Chapter 2 - B">Chapter 2 - B</a></li>'
+  it('parseChapterList: no numbers anywhere → list position', () => {
+    const html = '<li><a href="/x/prologue.html" title="Prologue">Prologue</a></li><li><a href="/x/the-start.html" title="The Start">The Start</a></li>'
     expect(novelfullnet.parseChapterList(html).map((c) => c.number)).toEqual([1, 2])
+  })
+
+  it('parseChapterList: lettered parts stay distinct; unnumbered entries sit after their predecessor', () => {
+    const html = ['Chapter 1', 'Chapter 2.A', 'Chapter 2.B', 'Side Story', 'Chapter 3']
+      .map((t, i) => `<li><a href="/x/c${i}.html" title="${t}">${t}</a></li>`).join('')
+    expect(novelfullnet.parseChapterList(html).map((c) => c.number)).toEqual([1, 2.1, 2.2, 2.21, 3])
   })
 
   it('parseChapterText: paragraphs kept, ad slot + scripts stripped', () => {
