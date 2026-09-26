@@ -1,79 +1,80 @@
 import { render, screen } from '@testing-library/svelte'
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { describe, expect, it } from 'vitest'
 import SearchProgress from './SearchProgress.svelte'
+import type { SourceInfo } from '../../lib/api'
 
-beforeEach(() => { vi.useFakeTimers() })
-afterEach(() => { vi.useRealTimers() })
+const SOURCES: SourceInfo[] = [
+  { key: 'mangaupdates', label: 'MangaUpdates' },
+  { key: 'royalroad', label: 'Royal Road' },
+  { key: 'novelupdates', label: 'NovelUpdates' },
+  { key: 'wuxiaworld', label: 'WuxiaWorld' },
+  { key: 'anilist', label: 'AniList' },
+]
+
+type Entry = { status: 'searching' | 'found' | 'empty' | 'error' | 'timeout'; count?: number }
+
+function pill(container: HTMLElement, key: string) {
+  return container.querySelector(`[data-testid="source-pill-${key}"]`) as HTMLElement
+}
 
 describe('SearchProgress', () => {
-  describe('searching state (no completedSources)', () => {
-    it('shows "Searching sources…" heading', () => {
-      render(SearchProgress, {})
-      expect(screen.getByText(/searching sources/i)).toBeDefined()
-    })
-
-    it('renders skeleton rows', () => {
-      const { container } = render(SearchProgress, {})
-      const skeletons = container.querySelectorAll('.animate-pulse')
-      expect(skeletons.length).toBeGreaterThan(0)
-    })
-
-    it('pills appear progressively after timers advance', async () => {
-      const { container } = render(SearchProgress, {})
-      const allPills = container.querySelectorAll('[data-testid^="source-pill-"]')
-      const visibleBefore = Array.from(allPills).filter(
-        (el) => !el.classList.contains('opacity-0')
-      ).length
-      // Advance past all 6 stagger intervals (120ms × 6 = 720ms)
-      await vi.advanceTimersByTimeAsync(720)
-      const visibleAfter = Array.from(allPills).filter(
-        (el) => !el.classList.contains('opacity-0')
-      ).length
-      expect(visibleAfter).toBeGreaterThan(visibleBefore)
-    })
+  it('renders exactly the sources it is given (no hard-coded list)', () => {
+    const { container } = render(SearchProgress, { sources: SOURCES.slice(0, 2), state: new Map() })
+    const pills = container.querySelectorAll('[data-testid^="source-pill-"]')
+    expect(pills.length).toBe(2)
+    expect(pill(container, 'royalroad').textContent).toContain('Royal Road')
+    expect(pill(container, 'nhentai')).toBeNull()
   })
 
-  describe('completed state (completedSources provided)', () => {
-    it('shows "Results from…" heading', () => {
-      render(SearchProgress, { completedSources: new Set(['mangaupdates']) })
-      expect(screen.getByText(/results from/i)).toBeDefined()
-    })
+  it('searching → pulsing violet pill and "Searching sources…" heading', () => {
+    const state = new Map<string, Entry>([['mangaupdates', { status: 'searching' }]])
+    const { container } = render(SearchProgress, { sources: SOURCES.slice(0, 1), state })
+    expect(screen.getByText(/searching sources/i)).toBeDefined()
+    expect(pill(container, 'mangaupdates').className).toContain('text-primary')
+    expect(pill(container, 'mangaupdates').querySelector('[data-testid="source-dot"]')!.className).toContain('animate-pulse')
+  })
 
-    it('does NOT render skeleton rows', () => {
-      const { container } = render(SearchProgress, { completedSources: new Set(['mangaupdates']) })
-      expect(container.querySelector('[data-testid="skeleton-rows"]')).toBeNull()
-    })
+  it('found → green with the count, empty → grey "no results", error/timeout → amber', () => {
+    const state = new Map<string, Entry>([
+      ['mangaupdates', { status: 'found', count: 12 }],
+      ['royalroad', { status: 'empty', count: 0 }],
+      ['novelupdates', { status: 'timeout', count: 0 }],
+      ['wuxiaworld', { status: 'error', count: 0 }],
+      ['anilist', { status: 'found', count: 3 }],
+    ])
+    const { container } = render(SearchProgress, { sources: SOURCES, state })
+    const mu = pill(container, 'mangaupdates')
+    expect(mu.className).toContain('text-green')
+    expect(mu.textContent).toContain('12')
+    expect(mu.querySelector('[data-testid="source-dot"]')!.className).not.toContain('animate-pulse')
 
-    it('all pills are immediately visible (no stagger)', () => {
-      const { container } = render(SearchProgress, { completedSources: new Set(['mangaupdates']) })
-      const pills = container.querySelectorAll('[data-testid^="source-pill-"]')
-      expect(pills.length).toBe(6)
-      const hidden = Array.from(pills).filter((el) => el.classList.contains('opacity-0'))
-      expect(hidden.length).toBe(0)
-    })
+    const rr = pill(container, 'royalroad')
+    expect(rr.className).toContain('opacity-50')
+    expect(rr.getAttribute('title')).toBe('no results')
 
-    it('matched source pills turn green after stagger', async () => {
-      const { container } = render(SearchProgress, { completedSources: new Set(['mangaupdates', 'anilist']) })
-      // mangaupdates is index 0 — needs settled >= 1, so just one 100ms step
-      await vi.advanceTimersByTimeAsync(100)
-      const pill = container.querySelector('[data-testid="source-pill-mangaupdates"]')
-      expect(pill?.className).toContain('text-green')
-    })
+    expect(pill(container, 'novelupdates').className).toContain('text-amber')
+    expect(pill(container, 'novelupdates').getAttribute('title')).toBe('timed out')
+    expect(pill(container, 'wuxiaworld').className).toContain('text-amber')
+    expect(pill(container, 'wuxiaworld').getAttribute('title')).toBe('error')
+  })
 
-    it('unmatched source pills are dimmed after stagger', async () => {
-      const { container } = render(SearchProgress, { completedSources: new Set(['mangaupdates']) })
-      await vi.advanceTimersByTimeAsync(800)
-      const pill = container.querySelector('[data-testid="source-pill-nhentai"]')
-      expect(pill?.className).toContain('opacity-50')
-    })
+  it('all settled → "Results from…" heading', () => {
+    const state = new Map<string, Entry>([['mangaupdates', { status: 'found', count: 1 }]])
+    render(SearchProgress, { sources: SOURCES.slice(0, 1), state })
+    expect(screen.getByText(/results from/i)).toBeDefined()
+  })
 
-    it('dot on matched source is green, not pulsing after stagger', async () => {
-      const { container } = render(SearchProgress, { completedSources: new Set(['mangaupdates']) })
-      await vi.advanceTimersByTimeAsync(100)
-      const pill = container.querySelector('[data-testid="source-pill-mangaupdates"]')
-      const dot = pill?.querySelector('[data-testid="source-dot"]')
-      expect(dot?.className).toContain('bg-green')
-      expect(dot?.className).not.toContain('animate-pulse')
-    })
+  it('a source with no state yet counts as searching', () => {
+    const { container } = render(SearchProgress, { sources: SOURCES.slice(0, 1), state: new Map() })
+    expect(screen.getByText(/searching sources/i)).toBeDefined()
+    expect(pill(container, 'mangaupdates').className).toContain('text-primary')
+  })
+
+  it('renders skeleton rows only when asked', () => {
+    const { container, unmount } = render(SearchProgress, { sources: SOURCES, state: new Map(), skeleton: true })
+    expect(container.querySelector('[data-testid="skeleton-rows"]')).not.toBeNull()
+    unmount()
+    const r = render(SearchProgress, { sources: SOURCES, state: new Map() })
+    expect(r.container.querySelector('[data-testid="skeleton-rows"]')).toBeNull()
   })
 })

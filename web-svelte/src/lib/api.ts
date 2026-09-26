@@ -219,6 +219,50 @@ async function patch<T>(path: string, body: unknown): Promise<T> {
 
 // ——— API ———
 
+// ——— Discover live progress (spec 021) ———
+
+export interface SourceInfo {
+  key: string
+  label: string
+}
+
+export type SourceStatus = 'found' | 'empty' | 'error' | 'timeout'
+
+export type StreamEvent =
+  | { type: 'sources'; sources: SourceInfo[] }
+  | { type: 'source'; key: string; status: SourceStatus; count: number; ms: number; results: SearchResult[] }
+  | { type: 'done'; ok: boolean }
+
+/** Splits NDJSON: every complete line parsed, the trailing partial line returned as `rest`. */
+export function splitNdjson(buffer: string): { lines: unknown[]; rest: string } {
+  const parts = buffer.split('\n')
+  const rest = parts.pop() ?? ''
+  return { lines: parts.filter((l) => l.trim()).map((l) => JSON.parse(l)), rest }
+}
+
+/** `GET /api/discover/stream` — fetch, not EventSource, so the auth header is sent. */
+async function searchMangaStream(
+  q: string,
+  onEvent: (e: StreamEvent) => void,
+  signal: AbortSignal,
+): Promise<void> {
+  const url = new URL(base() + '/api/discover/stream', window.location.href)
+  url.searchParams.set('q', q)
+  const res = await fetch(url, { headers: authHeaders(), signal })
+  handle401(res.status)
+  if (!res.ok || !res.body) throw new Error(`${res.status} ${res.statusText}`)
+  const reader = res.body.getReader()
+  const decoder = new TextDecoder()
+  let rest = ''
+  for (;;) {
+    const { done, value } = await reader.read()
+    if (done) break
+    const split = splitNdjson(rest + decoder.decode(value, { stream: true }))
+    rest = split.rest
+    split.lines.forEach((l) => onEvent(l as StreamEvent))
+  }
+}
+
 export const api = {
   // Auth
   authStatus: () => get<AuthStatus>('/api/auth/status'),
@@ -267,6 +311,7 @@ export const api = {
 
   searchManga: (q: string) =>
     get<SearchResult[]>('/api/discover', { q }),
+  searchMangaStream,
 
   getTrending: () => get<SearchResult[]>('/api/discover/trending/manga'),
   getTrendingManga: () => get<SearchResult[]>('/api/discover/trending/manga'),

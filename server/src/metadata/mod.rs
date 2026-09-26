@@ -15,4 +15,5 @@ pub mod anilist;
 pub mod mangadex;
 pub mod mangaupdates;
 pub mod novelupdates;
+pub mod royalroad;
 pub mod wuxiaworld;

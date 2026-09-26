@@ -39,6 +39,30 @@
     ]
   },
   {
+    "id": "novelfullnet",
+    "name": "NovelFull.net",
+    "description": "novelfull.net \u2014 same site as NovelFull on another domain, with a different catalog (e.g. The Primal Hunter). Returns chapter text. Cloudflare-protected \u2014 requires CloakBrowser.",
+    "version": "1.0.0",
+    "download_url": null,
+    "bundled": true,
+    "default_explicit": false,
+    "content_types": [
+      "novel"
+    ]
+  },
+  {
+    "id": "royalroad",
+    "name": "Royal Road",
+    "description": "English-original web fiction (LitRPG, progression fantasy). Returns chapter text. Direct fetch \u2014 no CloakBrowser.",
+    "version": "1.0.0",
+    "download_url": null,
+    "bundled": true,
+    "default_explicit": false,
+    "content_types": [
+      "novel"
+    ]
+  },
+  {
     "id": "mangapill",
     "name": "Mangapill",
     "description": "Fast manga reader with cover proxy support.",

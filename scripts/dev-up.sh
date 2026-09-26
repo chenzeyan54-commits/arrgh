@@ -34,13 +34,16 @@ else
   $CONTAINER_CMD run -d --name "$CLOAKBROWSER_NAME" -p "${CLOAKBROWSER_PORT}:3000" arrgh-cloakbrowser >/dev/null
 fi
 
+echo "[dev-up] building plugins from the working tree"
+./scripts/sync-plugins.sh || exit 1
+
 pids=()
 start() {
   ( "$@" ) &
   pids+=("$!")
 }
 
-start bash -c "cd server && JwtSecret=dev-secret cargo run"
+start bash -c "cd server && JwtSecret=dev-secret PluginIndexUrl=\"\${PluginIndexUrl:-file://../plugin-index/index.json}\" cargo run"
 start bash -c "cd web-svelte && npm run dev"
 start bash -c "cd plugin-host && CLOAKBROWSER_WS_URL=http://localhost:${CLOAKBROWSER_PORT} npm start"
 
@@ -56,5 +59,6 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 echo "[dev-up] all services starting — web http://localhost:5173, api http://localhost:3001, plugin-host http://localhost:4000, cloakbrowser http://localhost:${CLOAKBROWSER_PORT}"
+echo "[dev-up] rebuild plugins: ./scripts/sync-plugins.sh (plugin-host hot-reloads)"
 echo "[dev-up] Ctrl-C to stop everything"
 wait

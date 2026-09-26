@@ -11,6 +11,7 @@ use serde::Deserialize;
 pub struct NovelUpdatesSeries {
     pub source_id: String,
     pub title: String,
+    pub description: Option<String>,
     pub cover_url: Option<String>,
     pub status: String,
 }
@@ -19,6 +20,7 @@ pub struct NovelUpdatesSeries {
 struct PluginSearchResult {
     id: Option<String>,
     title: Option<String>,
+    description: Option<String>,
     cover_url: Option<String>,
     status: Option<String>,
 }
@@ -43,6 +45,7 @@ pub async fn search(
             Some(NovelUpdatesSeries {
                 source_id: id,
                 title,
+                description: r.description.filter(|d| !d.is_empty()),
                 cover_url: r.cover_url,
                 status: r.status.unwrap_or_else(|| "unknown".to_string()),
             })

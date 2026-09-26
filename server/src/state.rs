@@ -90,7 +90,12 @@ impl AppState {
             page_cache: Arc::new(PageCache::default()),
             logs,
             db,
-            http: reqwest::Client::new(),
+            // Default UA: MangaDex (and other APIs) reject requests without one
+            // (400). Per-request `User-Agent` headers still override it.
+            http: reqwest::Client::builder()
+                .user_agent(concat!("arrgh-server/", env!("CARGO_PKG_VERSION")))
+                .build()
+                .expect("reqwest client"),
         }
     }
 }

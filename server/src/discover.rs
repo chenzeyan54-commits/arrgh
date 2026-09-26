@@ -45,12 +45,17 @@ pub fn normalize_title(title: &str) -> String {
         .to_lowercase()
 }
 
-pub const AUTHORITY_ORDER: [&str; 6] = [
+/// Royal Road — English-original novels (ADR 0034). Metadata authority and
+/// chapter Source share this key.
+pub const ROYALROAD: &str = "royalroad";
+
+pub const AUTHORITY_ORDER: [&str; 7] = [
     "mangaupdates",
     "anilist",
     "mangadex",
     "novelupdates",
     "wuxiaworld",
+    ROYALROAD,
     "nhentai",
 ];
 
@@ -637,6 +642,33 @@ mod tests {
         let merged = merge_fan_out(results);
         assert_eq!(merged[0].source, "mangaupdates");
         assert_eq!(merged[1].source, "novelupdates");
+    }
+
+    #[test]
+    fn royalroad_ordered_after_wuxiaworld_before_nhentai() {
+        let pos = |a: &str| AUTHORITY_ORDER.iter().position(|x| *x == a).unwrap();
+        assert_eq!(pos(ROYALROAD), pos("wuxiaworld") + 1);
+        assert!(pos(ROYALROAD) < pos("nhentai"));
+    }
+
+    #[test]
+    fn novelupdates_beats_royalroad_on_same_title() {
+        let merged = merge_fan_out(vec![
+            result(ROYALROAD, "X", "novel"),
+            result("novelupdates", "X", "novel"),
+        ]);
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].source, "novelupdates");
+    }
+
+    #[test]
+    fn royalroad_sorted_after_manga_authorities() {
+        let merged = merge_fan_out(vec![
+            result(ROYALROAD, "A", "novel"),
+            result("mangaupdates", "B", "manga"),
+        ]);
+        assert_eq!(merged[0].source, "mangaupdates");
+        assert_eq!(merged[1].source, ROYALROAD);
     }
 
     #[test]

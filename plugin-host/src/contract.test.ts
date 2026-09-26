@@ -3,6 +3,7 @@
 // Catches: wrong content_types, missing default_explicit, id mismatch with plugin-index/index.json.
 
 import { describe, it, expect } from 'vitest'
+import { readFileSync } from 'node:fs'
 
 // ── Existing plugins ──────────────────────────────────────────────────────────
 
@@ -127,8 +128,10 @@ describe('plugin-index.json consistency', () => {
     expect(indexed).toContain('novel')
   })
 
-  it('royalroad not in plugin-index (removed — broken)', () => {
-    expect(indexMap.has('royalroad')).toBe(false)
+  it('royalroad in plugin-index as bundled novel plugin (ADR 0034 supersedes 0024)', () => {
+    const rr = indexJson.find((p: { id: string }) => p.id === 'royalroad')
+    expect(rr?.bundled).toBe(true)
+    expect(rr?.content_types).toEqual(['novel'])
   })
 
   it('manhuafast not in plugin-index (removed — CF managed challenge)', () => {
@@ -137,5 +140,32 @@ describe('plugin-index.json consistency', () => {
 
   it('boxnovel not in plugin-index (removed — domain parked)', () => {
     expect(indexMap.has('boxnovel')).toBe(false)
+  })
+})
+
+// ── Production plugin set (spec 020) ─────────────────────────────────────────
+// One definition, three places: the plugin-host image, `npm run build:plugins`
+// (also what scripts/sync-plugins.sh builds for dev), and the bundled index.
+
+describe('production plugin set', () => {
+  const root = new URL('../../', import.meta.url)
+  const read = (p: string) => readFileSync(new URL(p, root), 'utf8')
+
+  const dockerfile = [...read('plugin-host/Dockerfile').matchAll(
+    /COPY --from=bundles \/build\/plugins\/([^/]+)\/bundles\/\1\.js/g,
+  )].map((m) => m[1]).sort()
+  const buildScript = JSON.parse(read('package.json')).scripts['build:plugins'] as string
+  const built = [...buildScript.matchAll(/-w plugins\/(\S+)/g)].map((m) => m[1]).sort()
+  const index = (JSON.parse(read('plugin-index/index.json')) as { id: string; bundled?: boolean }[])
+    .filter((p) => p.bundled).map((p) => p.id).sort()
+
+  it('Dockerfile, build:plugins and index bundled list the same plugins', () => {
+    expect(dockerfile.length).toBeGreaterThan(0)
+    expect(built).toEqual(dockerfile)
+    expect(index).toEqual(dockerfile)
+  })
+
+  it('never ships the e2e fixture plugin', () => {
+    expect(dockerfile).not.toContain('fixture')
   })
 })

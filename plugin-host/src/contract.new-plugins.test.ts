@@ -5,6 +5,9 @@ import { describe, it, expect } from 'vitest'
 import * as asurascans from '../../plugins/asurascans/src/index'
 import * as wuxiaworld from '../../plugins/wuxiaworld/src/index'
 import * as manga18fx  from '../../plugins/manga18fx/src/index'
+import * as royalroad  from '../../plugins/royalroad/src/index'
+import * as novelfullnet from '../../plugins/novelfullnet/src/index'
+import { readFileSync } from 'node:fs'
 
 // ── AsuraScans (manhwa) ───────────────────────────────────────────────────────
 
@@ -54,4 +57,40 @@ describe('manga18fx', () => {
   it('exports chapters fn', () => expect(typeof manga18fx.chapters).toBe('function'))
   it('exports pages fn',    () => expect(typeof manga18fx.pages).toBe('function'))
   it('no chapterText fn',   () => expect((manga18fx as any).chapterText).toBeUndefined())
+})
+
+// ── Royal Road (novel, English originals — ADR 0034) ──────────────────────────
+
+describe('royalroad', () => {
+  it('info.id is royalroad',   () => expect(royalroad.info.id).toBe('royalroad'))
+  it('name is Royal Road',     () => expect(royalroad.info.name).toBe('Royal Road'))
+  it('default_explicit false', () => expect(royalroad.info.default_explicit).toBe(false))
+  it('content_types is novel', () => expect(royalroad.info.content_types).toEqual(['novel']))
+
+  it('exports search fn',      () => expect(typeof royalroad.search).toBe('function'))
+  it('exports meta fn',        () => expect(typeof royalroad.meta).toBe('function'))
+  it('exports chapters fn',    () => expect(typeof royalroad.chapters).toBe('function'))
+  it('exports chapterText fn', () => expect(typeof royalroad.chapterText).toBe('function'))
+})
+
+// ── NovelFull.net (novel, CloakBrowser — spec 027) ────────────────────────────
+
+describe('novelfullnet', () => {
+  it('info.id is novelfullnet',   () => expect(novelfullnet.info.id).toBe('novelfullnet'))
+  it('name is NovelFull.net',     () => expect(novelfullnet.info.name).toBe('NovelFull.net'))
+  it('default_explicit false',    () => expect(novelfullnet.info.default_explicit).toBe(false))
+  it('content_types is novel',    () => expect(novelfullnet.info.content_types).toEqual(['novel']))
+
+  it('exports search fn',      () => expect(typeof novelfullnet.search).toBe('function'))
+  it('exports meta fn',        () => expect(typeof novelfullnet.meta).toBe('function'))
+  it('exports chapters fn',    () => expect(typeof novelfullnet.chapters).toBe('function'))
+  it('exports chapterText fn', () => expect(typeof novelfullnet.chapterText).toBe('function'))
+
+  it('plugin-index lists it as a bundled novel source', () => {
+    const index = JSON.parse(readFileSync(new URL('../../plugin-index/index.json', import.meta.url), 'utf8')) as
+      { id: string; bundled?: boolean; content_types: string[] }[]
+    const entry = index.find((p) => p.id === 'novelfullnet')
+    expect(entry?.bundled).toBe(true)
+    expect(entry?.content_types).toEqual(['novel'])
+  })
 })

@@ -1,11 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 vi.mock('./api', () => ({
-  api: { searchManga: vi.fn(), addTitle: vi.fn() },
+  api: { searchMangaStream: vi.fn(), addTitle: vi.fn() },
 }))
 
 import { DiscoverStore } from './discover.svelte'
-import { api } from './api'
+import { api, type StreamEvent } from './api'
 import { router } from './router.svelte'
 import { ROUTES } from './routes'
 
@@ -30,8 +30,29 @@ const anilistResult = { ...mockResult, source: 'anilist', mangaupdates_id: 'al-9
 beforeEach(() => {
   vi.clearAllMocks()
   vi.spyOn(router, 'navigate').mockImplementation(() => {})
-  vi.mocked(api.searchManga).mockResolvedValue([])
+  streamWith([])
 })
+
+const SOURCES = [
+  { key: 'mangaupdates', label: 'MangaUpdates' },
+  { key: 'anilist', label: 'AniList' },
+]
+
+/** Mock the stream: replay `events`, then resolve. */
+function streamWith(events: StreamEvent[]) {
+  vi.mocked(api.searchMangaStream).mockImplementation(async (_q, onEvent) => {
+    for (const e of events) onEvent(e)
+  })
+}
+
+/** A full successful stream whose final results are `results`. */
+function resultsStream(results: unknown[]): StreamEvent[] {
+  return [
+    { type: 'sources', sources: SOURCES },
+    { type: 'source', key: 'mangaupdates', status: results.length ? 'found' : 'empty', count: results.length, ms: 5, results: results as never },
+    { type: 'done', ok: true },
+  ]
+}
 
 function createStore() {
   let store!: DiscoverStore
@@ -42,18 +63,18 @@ function createStore() {
 }
 
 describe('DiscoverStore', () => {
-  it('submit triggers searchManga with current query', async () => {
+  it('submit triggers searchMangaStream with current query', async () => {
     const { store, cleanup } = createStore()
     store.query = 'naruto'
     store.submit()
-    await vi.waitFor(() => expect(api.searchManga).toHaveBeenCalledWith('naruto'))
+    await vi.waitFor(() => expect(api.searchMangaStream).toHaveBeenCalledWith('naruto', expect.any(Function), expect.any(AbortSignal)))
     cleanup()
   })
 
   it('submit does nothing when query is blank', () => {
     const { store, cleanup } = createStore()
     store.submit()
-    expect(api.searchManga).not.toHaveBeenCalled()
+    expect(api.searchMangaStream).not.toHaveBeenCalled()
     cleanup()
   })
 
@@ -66,7 +87,7 @@ describe('DiscoverStore', () => {
   })
 
   it('sets searchError on 502 with generic discovery message', async () => {
-    vi.mocked(api.searchManga).mockRejectedValue(new Error('502 Bad Gateway'))
+    vi.mocked(api.searchMangaStream).mockRejectedValue(new Error('502 Bad Gateway'))
     const { store, cleanup } = createStore()
     store.query = 'test'
     store.submit()
@@ -117,7 +138,7 @@ describe('DiscoverStore', () => {
       { ...anilistResult, content_type: 'manhwa' },
       { ...mockResult, mangaupdates_id: 'nu-1', source: 'novelupdates', content_type: 'novel' },
     ]
-    vi.mocked(api.searchManga).mockResolvedValue(mixed as never)
+    streamWith(resultsStream(mixed))
     const { store, cleanup } = createStore()
     store.query = 'test'
     store.submit()
@@ -130,7 +151,7 @@ describe('DiscoverStore', () => {
       { ...mockResult, content_type: 'manga' },
       { ...anilistResult, content_type: 'manhwa' },
     ]
-    vi.mocked(api.searchManga).mockResolvedValue(mixed as never)
+    streamWith(resultsStream(mixed))
     const { store, cleanup } = createStore()
     store.query = 'test'
     store.submit()
@@ -142,7 +163,7 @@ describe('DiscoverStore', () => {
   })
 
   it('setContentTypeFilter toggles off when called with current value', async () => {
-    vi.mocked(api.searchManga).mockResolvedValue([mockResult] as never)
+    streamWith(resultsStream([mockResult]))
     const { store, cleanup } = createStore()
     store.query = 'test'
     store.submit()
@@ -155,7 +176,7 @@ describe('DiscoverStore', () => {
   })
 
   it('resets contentTypeFilter when a new search is submitted', async () => {
-    vi.mocked(api.searchManga).mockResolvedValue([mockResult] as never)
+    streamWith(resultsStream([mockResult]))
     const { store, cleanup } = createStore()
     store.query = 'first'
     store.submit()
@@ -165,5 +186,97 @@ describe('DiscoverStore', () => {
     store.submit()
     await vi.waitFor(() => expect(store.contentTypeFilter).toBeUndefined())
     cleanup()
+  })
+
+  describe('streaming (spec 021)', () => {
+    it('sources event → every source is searching', async () => {
+      vi.mocked(api.searchMangaStream).mockImplementation(async (_q, onEvent) => {
+        onEvent({ type: 'sources', sources: SOURCES })
+        await new Promise(() => {}) // never finishes
+      })
+      const { store, cleanup } = createStore()
+      store.query = 'x'
+      store.submit()
+      await vi.waitFor(() => expect(store.sources).toEqual(SOURCES))
+      expect([...store.sourceState.values()].every((s) => s.status === 'searching')).toBe(true)
+      expect(store.isFetching).toBe(true)
+      cleanup()
+    })
+
+    it('first source event shows its results while still fetching; a later one replaces them', async () => {
+      let emit!: (e: StreamEvent) => void
+      vi.mocked(api.searchMangaStream).mockImplementation((_q, onEvent) => {
+        emit = onEvent
+        return new Promise(() => {})
+      })
+      const { store, cleanup } = createStore()
+      store.query = 'x'
+      store.submit()
+      await vi.waitFor(() => expect(emit).toBeDefined())
+      emit({ type: 'sources', sources: SOURCES })
+      emit({ type: 'source', key: 'anilist', status: 'found', count: 1, ms: 5, results: [anilistResult] as never })
+      expect(store.data).toEqual([anilistResult])
+      expect(store.isFetching).toBe(true)
+      expect(store.sourceState.get('anilist')).toEqual({ status: 'found', count: 1 })
+      expect(store.sourceState.get('mangaupdates')).toEqual({ status: 'searching' })
+
+      emit({ type: 'source', key: 'mangaupdates', status: 'found', count: 1, ms: 9, results: [mockResult, anilistResult] as never })
+      expect(store.data).toHaveLength(2)
+      emit({ type: 'done', ok: true })
+      expect(store.isFetching).toBe(false)
+      expect(store.searchError).toBeNull()
+      cleanup()
+    })
+
+    it('done{ok:false} → discovery-failed error', async () => {
+      streamWith([
+        { type: 'sources', sources: SOURCES },
+        { type: 'source', key: 'mangaupdates', status: 'error', count: 0, ms: 5, results: [] },
+        { type: 'source', key: 'anilist', status: 'timeout', count: 0, ms: 9, results: [] },
+        { type: 'done', ok: false },
+      ])
+      const { store, cleanup } = createStore()
+      store.query = 'x'
+      store.submit()
+      await vi.waitFor(() => expect(store.searchError).toBe('Discovery failed. Check your connection or server status.'))
+      expect(store.isFetching).toBe(false)
+      cleanup()
+    })
+
+    it('a new submit aborts the previous stream and ignores its late events', async () => {
+      const calls: { emit: (e: StreamEvent) => void; signal: AbortSignal }[] = []
+      vi.mocked(api.searchMangaStream).mockImplementation((_q, onEvent, signal) => {
+        calls.push({ emit: onEvent, signal })
+        return new Promise(() => {})
+      })
+      const { store, cleanup } = createStore()
+      store.query = 'first'
+      store.submit()
+      await vi.waitFor(() => expect(calls).toHaveLength(1))
+      store.query = 'second'
+      store.submit()
+      await vi.waitFor(() => expect(calls).toHaveLength(2))
+      expect(calls[0].signal.aborted).toBe(true)
+
+      calls[0].emit({ type: 'source', key: 'mangaupdates', status: 'found', count: 1, ms: 1, results: [mockResult] as never })
+      expect(store.data).toBeUndefined()
+      calls[1].emit({ type: 'source', key: 'anilist', status: 'found', count: 1, ms: 1, results: [anilistResult] as never })
+      expect(store.data).toEqual([anilistResult])
+      cleanup()
+    })
+
+    it('cleanup (leaving the page) aborts the stream', async () => {
+      let signal!: AbortSignal
+      vi.mocked(api.searchMangaStream).mockImplementation((_q, _onEvent, s) => {
+        signal = s
+        return new Promise(() => {})
+      })
+      const { store, cleanup } = createStore()
+      store.query = 'x'
+      store.submit()
+      await vi.waitFor(() => expect(signal).toBeDefined())
+      cleanup()
+      expect(signal.aborted).toBe(true)
+    })
   })
 })

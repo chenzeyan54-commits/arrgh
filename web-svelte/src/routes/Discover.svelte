@@ -47,11 +47,16 @@
         </div>
       {/if}
 
-      {#if store.isFetching || store.showProgress}
-        <SearchProgress completedSources={store.showProgress ? store.completedSources : undefined} />
+      {#if store.showProgress}
+        <SearchProgress
+          sources={store.sources}
+          state={store.sourceState}
+          skeleton={store.isFetching && !store.data?.length}
+        />
       {/if}
 
-      {#if store.data && !store.isFetching && !store.showProgress}
+      <!-- Results render as soon as any source has them, and update in place (spec 021). -->
+      {#if store.data && (store.data.length > 0 || !store.isFetching)}
         <div class="space-y-3">
           <ContentTypeFilter
             value={store.contentTypeFilter}
@@ -59,7 +64,7 @@
             availableTypes={store.availableTypes}
           />
 
-          {#if (store.filteredData?.length ?? 0) === 0}
+          {#if (store.filteredData?.length ?? 0) === 0 && !store.isFetching}
             <p class="text-muted-foreground text-sm">No results.</p>
           {/if}
 
