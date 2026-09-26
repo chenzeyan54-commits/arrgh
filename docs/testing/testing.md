@@ -158,6 +158,7 @@ Vitest + supertest. `createApp(plugins, communityIds?)` exported from `index.ts`
 | `DELETE /plugins/:id` → 403 for bundled plugin | ✅ |
 | `DELETE /plugins/:id` → 204 removes community plugin | ✅ |
 | `rewriteCdpHost` → rewrites 0.0.0.0 to localhost for local dev | ✅ |
+| Hung plugin call on any route (search/trending/meta/chapters/pages/text/cover) → 504 after `callTimeoutMs` (GH #159) | ✅ |
 | `rewriteCdpHost` → rewrites internal hostname to Docker service name | ✅ |
 | `rewriteCdpHost` → preserves path after host rewrite | ✅ |
 
