@@ -2,9 +2,7 @@
 [![CI](https://github.com/t2vi/arrgh/actions/workflows/ci.yml/badge.svg)](https://github.com/t2vi/arrgh/actions/workflows/ci.yml) [![GHCR](https://github.com/t2vi/arrgh/actions/workflows/ghcr.yml/badge.svg)](https://github.com/t2vi/arrgh/actions/workflows/ghcr.yml) [![Docs-site](https://github.com/t2vi/arrgh/actions/workflows/docs-site.yml/badge.svg)](https://github.com/t2vi/arrgh/actions/workflows/docs-site.yml)
 [![E2e](https://github.com/t2vi/arrgh/actions/workflows/e2e.yml/badge.svg)](https://github.com/t2vi/arrgh/actions/workflows/e2e.yml)
 
-**v0.1.7** · A self-hosted East Asian comics and novel manager, downloader, and reader for your home server. Supports manga, manhwa, manhua, novels, and hentai from multiple sources via a plugin system. Built to run on a NAS, Raspberry Pi, or any always-on box.
-
-> ⚠️ **Port change (v0.1.3+)** — the host-exposed port is now **8282** (was 8080 in v0.1.2 and earlier). Update any firewall rules, bookmarks, or reverse proxy configs. The internal container port remains 8080 — only the host-side mapping changed.
+**v1.2.0** · A self-hosted comics and web-novel manager, downloader, and reader for your home server. Supports manga, manhwa, manhua, novels (translated and English-original), and hentai from multiple sources via a plugin system. Built to run on a NAS, Raspberry Pi, or any always-on box.
 
 > I'm a solo dev who built this for myself — tired of juggling browser tabs, download scripts, and folder structures just to keep up with series. If you find it useful or want to contribute, you're very welcome. See [Contributing](#contributing).
 
@@ -17,6 +15,8 @@
 - Title aliases from MangaUpdates associated names — improves cross-source matching for series with multiple romanisations
 - Chapters aggregated across all registered sources — completeness doesn't depend on any one source being up to date
 - Automatic download fallback — if the preferred source fails, arrgh tries the next by priority
+- Parallel downloads — **Download workers** (Settings → Downloads, 1–10) chapters at once; changes apply without a restart
+- A stuck source can't stall search, sync or downloads — every plugin call is time-limited
 - Hentai source routing — explicit sources only matched for titles tagged `hentai`; non-explicit sources skipped for them
 - Source plugin system — add new download sources without recompiling or redeploying
 - Browse and install community plugins from the Settings UI
@@ -27,7 +27,6 @@
 - Sync warnings — amber badge when a source couldn't be matched; re-sync to retry
 - Web reader (paged or scroll mode for comics; prose mode for novels)
 - Multi-user support — per-user libraries with shared file storage, per-user reading progress
-- Auto-download new chapters on a schedule
 - Explicit content controls — admin grants access per user; 18+ badge shown on all title cards (library, home, Discover, trending)
 - Shared download queue — visible to all users, members cancel own items, admins cancel any
 
@@ -42,9 +41,7 @@ docker compose up -d
 
 Open `http://<your-server-ip>:8282` — the setup wizard runs on first launch.
 
-> **Upgrading from v0.1.2 or earlier?** The host port changed from `8080` to `8282`. Run `docker compose pull && docker compose up -d` and update any firewall rules or reverse proxy configs pointing to the old port.
-
-The default Compose file includes the **Mangapill** and **MangaDex** plugins. They auto-register on first boot via `PLUGIN_URLS` — no manual configuration needed.
+The default Compose file runs **plugin-host** (all bundled sources, below) and the **CloakBrowser** sidecar for Cloudflare-protected sites. The bundled sources register on first boot — no manual configuration needed.
 
 See [docs/deploy/docker-compose.md](docs/deploy/docker-compose.md) for full configuration.
 
@@ -102,7 +99,9 @@ All default sources compile into a single **plugin-host** container — no per-p
 | **NovelFull.net** | Novel | `plugins/novelfullnet/` | novelfull.net — same site, different catalog (e.g. The Primal Hunter); CF-protected — uses CloakBrowser |
 | **WuxiaWorld** | Novel | `plugins/wuxiaworld/` | Official API — no CF protection |
 | **Royal Road** | Novel (English originals) | `plugins/royalroad/` | Direct fetch — no CF protection; also a Discover authority |
-| **nhentai** | Hentai doujinshi | `plugins/nhentai/` | CF-protected — uses CloakBrowser; explicit-only source |
+| **nhentai** | Hentai doujinshi | `plugins/nhentai/` | Direct API, CloakBrowser fallback when challenged; explicit-only source |
+
+`plugins/novelupdates/` is not a download source — it backs the NovelUpdates Discover authority.
 
 CF-protected plugins route through the **CloakBrowser** sidecar (stealth Chromium, source-level fingerprint patches). Plugin Host holds the CDP connection; plugins call `ctx.getBrowser()` via `PluginContext`.
 
@@ -132,6 +131,8 @@ GET /chapter/:source_id/text      → Markdown string (novel/light-novel chapter
 
 Plugins can be written in any language. See `plugins/mangadex/` (API-backed) and `plugins/toonily/` (scraper + CloakBrowser) for reference implementations.
 
+plugin-host bounds every plugin call (`PLUGIN_CALL_TIMEOUT_MS`, default 180 s) and answers `504` when one runs out of time.
+
 > **Note**: older plugins that implement `/search`, `/trending`, `/meta`, or `/cover` continue to work — arrgh ignores those routes but doesn't reject plugins that expose them.
 
 ---
@@ -143,16 +144,16 @@ arrgh/
 ├── server/          # Rust / axum API server
 ├── web-svelte/      # Svelte 5 + TypeScript SPA
 ├── plugin-host/     # Node.js plugin host (loads compiled plugin bundles)
+├── plugin-index/    # index.json — plugin catalog shipped in the image
+├── scripts/         # dev-up.sh (one-command dev stack), sync-plugins.sh
 └── plugins/         # Plugin source bundles (esbuild → single .js)
-    ├── mangadex/
-    ├── mangapill/
-    ├── toonily/
-    ├── novelfull/
-    ├── royalroad/
-    ├── novelfullnet/
+    ├── mangadex/  mangapill/  toonily/  asurascans/  manga18fx/
+    ├── novelfull/  novelfullnet/  wuxiaworld/  royalroad/  novelupdates/
     ├── nhentai/
-    └── manga18fx/
+    └── fixture/     # e2e test plugin — never shipped
 ```
+
+> Plugins are moving to one repo each, with one-click updates from Settings ([#199](https://github.com/t2vi/arrgh/issues/199)).
 
 - **Backend**: Rust, axum, sqlx (SQLite)
 - **Frontend**: Svelte 5 (runes), TypeScript, Vite, Tailwind
@@ -166,7 +167,7 @@ Issues and PRs are welcome. A few things to know:
 
 - This is a personal project — I may be slow to review, but I do look at everything
 - Check open issues before starting large features; comment to claim one
-- Run `cargo test` (server) and `npm test` (web) before submitting
+- Run `cargo test` (server), `npm test` in `web-svelte/` and `plugin-host/` before submitting
 - Follow the existing code style — see `CLAUDE.md` for dev setup
 
 ### Local development (quick start)
