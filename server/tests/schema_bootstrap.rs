@@ -152,3 +152,117 @@ async fn reconnecting_to_an_already_migrated_db_is_idempotent() {
 
     std::fs::remove_file(&path).ok();
 }
+
+/// Spec 019 / ADR 0034: migration 0004 restores the Royal Road Source row
+/// on existing installs (0003 deleted it), and no-ops on an empty table
+/// (fresh installs get it from `DEFAULT_SOURCES`).
+#[tokio::test]
+async fn migration_0004_restores_royalroad_on_existing_install_only() {
+    let path = temp_db_path("rr");
+
+    // Fresh DB: 0004 runs against an empty external_sources → inserts nothing.
+    let pool = connect_db(&path).await.unwrap();
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM external_sources")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 0);
+
+    // Simulate an existing install that hasn't run 0004 yet.
+    sqlx::query(
+        "INSERT INTO external_sources (id, name, base_url, content_types, enabled, created_at, is_community, priority, source_key, default_explicit) \
+         VALUES ('nf', 'NovelFull', 'http://ph:4000', 'novel', 1, datetime('now'), 0, 40, 'novelfull', 0)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    pool.close().await;
+    for _ in 0..2 {
+        // Twice: second pass proves idempotence.
+        let p = connect_db(&path).await.unwrap();
+        sqlx::query("DELETE FROM _sqlx_migrations WHERE version = 4")
+            .execute(&p)
+            .await
+            .unwrap();
+        p.close().await;
+        let reopened = connect_db(&path).await.unwrap();
+        let rows: Vec<(String, String, String, i64, i64, i64, i64)> = sqlx::query_as(
+            "SELECT name, base_url, content_types, priority, enabled, is_community, default_explicit \
+             FROM external_sources WHERE source_key = 'royalroad'",
+        )
+        .fetch_all(&reopened)
+        .await
+        .unwrap();
+        assert_eq!(
+            rows,
+            vec![(
+                "Royal Road".to_string(),
+                "http://ph:4000".to_string(),
+                "novel".to_string(),
+                35,
+                1,
+                0,
+                0
+            )]
+        );
+        reopened.close().await;
+    }
+
+    std::fs::remove_file(&path).ok();
+}
+
+/// Spec 027: migration 0005 adds the NovelFull.net Source to existing
+/// installs, and no-ops on an empty table (fresh installs get it from
+/// `DEFAULT_SOURCES`).
+#[tokio::test]
+async fn migration_0005_adds_novelfullnet_on_existing_install_only() {
+    let path = temp_db_path("nfn");
+
+    let pool = connect_db(&path).await.unwrap();
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM external_sources")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 0);
+
+    sqlx::query(
+        "INSERT INTO external_sources (id, name, base_url, content_types, enabled, created_at, is_community, priority, source_key, default_explicit) \
+         VALUES ('nf', 'NovelFull', 'http://ph:4000', 'novel', 1, datetime('now'), 0, 40, 'novelfull', 0)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    pool.close().await;
+    for _ in 0..2 {
+        // Twice: second pass proves idempotence.
+        let p = connect_db(&path).await.unwrap();
+        sqlx::query("DELETE FROM _sqlx_migrations WHERE version = 5")
+            .execute(&p)
+            .await
+            .unwrap();
+        p.close().await;
+        let reopened = connect_db(&path).await.unwrap();
+        let rows: Vec<(String, String, String, i64, i64, i64, i64)> = sqlx::query_as(
+            "SELECT name, base_url, content_types, priority, enabled, is_community, default_explicit \
+             FROM external_sources WHERE source_key = 'novelfullnet'",
+        )
+        .fetch_all(&reopened)
+        .await
+        .unwrap();
+        assert_eq!(
+            rows,
+            vec![(
+                "NovelFull.net".to_string(),
+                "http://ph:4000".to_string(),
+                "novel".to_string(),
+                45,
+                1,
+                0,
+                0
+            )]
+        );
+        reopened.close().await;
+    }
+
+    std::fs::remove_file(&path).ok();
+}

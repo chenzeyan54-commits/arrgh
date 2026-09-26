@@ -45,6 +45,7 @@ async function flareHtml(url: string): Promise<string> {
 export interface SearchResult {
   id: string
   title: string
+  description: string | null
   cover_url: string | null
   status: string
   content_type: string
@@ -53,17 +54,18 @@ export interface SearchResult {
 // ── Search ────────────────────────────────────────────────────────────────────
 
 export async function search(query: string): Promise<SearchResult[]> {
-  const url = `${BASE}/?s=${encodeURIComponent(query)}&post_type=series`
+  const url = `${BASE}/series-finder/?sf=1&sh=${encodeURIComponent(query)}`
   const html = await flareHtml(url)
   return parseSearchHtml(html)
 }
 
+// Parses Series Finder result rows (the old /?s= search now 404s — spec 022).
 // Exported for unit testing
 export function parseSearchHtml(html: string): SearchResult[] {
   const $ = cheerio.load(html)
   const results: SearchResult[] = []
 
-  // NovelUpdates search results: each .search_main_box_nu block
+  // Series Finder results: each .search_main_box_nu block
   $('.search_main_box_nu').each((_, el) => {
     const $el = $(el)
 
@@ -83,7 +85,13 @@ export function parseSearchHtml(html: string): SearchResult[] {
     const statusRaw = $el.find('.series_latest_status').first().text().trim()
     const status = mapStatus(statusRaw)
 
-    results.push({ id: slug, title, cover_url: cover || null, status, content_type: 'novel' })
+    // Synopsis = the row body minus title/stats/genres; the "more>>" remainder
+    // sits in a hidden .testhide span in the same row.
+    const $body = $el.find('.search_body_nu').first().clone()
+    $body.find('.search_title, .search_stats, .search_genre, .dots, .morelink').remove()
+    const description = $body.text().replace(/\s+/g, ' ').trim() || null
+
+    results.push({ id: slug, title, description, cover_url: cover || null, status, content_type: 'novel' })
   })
 
   return results

@@ -34,7 +34,7 @@
       onerror={(e) => ((e.target as HTMLImageElement).style.visibility = 'hidden')}
     />
   {:else}
-    <div class="w-14 shrink-0 rounded aspect-[2/3] bg-muted animate-pulse"></div>
+    <div data-testid="cover-placeholder" class="w-14 shrink-0 rounded aspect-[2/3] bg-muted"></div>
   {/if}
 
   <div class="flex-1 min-w-0 space-y-1.5">
@@ -56,13 +56,9 @@
       {/if}
     </div>
 
+    <!-- No skeleton when missing: nothing fills it in later (e.g. NovelUpdates has no synopsis). -->
     {#if result.description}
       <p class="text-xs text-muted-foreground line-clamp-3">{result.description}</p>
-    {:else}
-      <div class="space-y-1 pt-0.5">
-        <div class="h-2.5 w-full bg-muted rounded animate-pulse"></div>
-        <div class="h-2.5 w-4/5 bg-muted rounded animate-pulse"></div>
-      </div>
     {/if}
   </div>
 

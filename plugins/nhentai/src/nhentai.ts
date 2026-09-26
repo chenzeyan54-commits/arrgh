@@ -63,7 +63,35 @@ function pageImageUrl(path: string): string {
   return `https://i.nhentai.net/${path}`
 }
 
-// ── nhentai API via browser context (bypasses CF) ─────────────────────────────
+// ── Direct v2 API (spec 023) ──────────────────────────────────────────────────
+// nhentai's documented v2 API answers plain requests (verified 2026-09-26), so we
+// only fall back to CloakBrowser when a Cloudflare challenge comes back instead.
+
+const UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
+
+class ChallengeError extends Error {}
+
+async function apiGet<T>(url: string): Promise<T> {
+  const res = await fetch(url, { headers: { 'User-Agent': UA, Accept: 'application/json' } })
+  const type = res.headers.get('content-type') ?? ''
+  if (res.status === 403 || res.status === 503 || !type.includes('json')) {
+    throw new ChallengeError(`nhentai challenge ${res.status}: ${url}`)
+  }
+  if (!res.ok) throw new Error(`nhentai API ${res.status}: ${url}`)
+  return res.json() as Promise<T>
+}
+
+async function directOr<T>(url: string, viaBrowser: () => Promise<T>): Promise<T> {
+  try {
+    return await apiGet<T>(url)
+  } catch (e) {
+    if (!(e instanceof ChallengeError)) throw e
+    _ctx?.logger.warn(`[nhentai] ${e.message} — retrying via CloakBrowser`)
+    return viaBrowser()
+  }
+}
+
+// ── Browser fallback (bypasses CF) ────────────────────────────────────────────
 
 async function withPage<T>(
   landingUrl: string,
@@ -91,7 +119,8 @@ async function apiFetch<T>(page: BrowserPage, url: string): Promise<T> {
 // ── Gallery data ──────────────────────────────────────────────────────────────
 
 async function fetchGalleryData(id: number): Promise<GalleryData> {
-  return withPage(`${BASE}/g/${id}/`, async (page) => {
+  const url = `${API}/galleries/${id}`
+  return directOr(url, () => withPage(`${BASE}/g/${id}/`, async (page) => {
     // Service worker may have cached the API response in an inline script
     const fromCache = await page.evaluate((gid: number) => {
       const w = window as unknown as Record<string, unknown>
@@ -110,23 +139,23 @@ async function fetchGalleryData(id: number): Promise<GalleryData> {
 
     if (fromCache?.pages) return fromCache
 
-    // Fallback: call v2 API directly — CF cookies are set from the page load above
-    return apiFetch<GalleryData>(page, `${API}/galleries/${id}`)
-  })
+    // CF cookies are set from the page load above
+    return apiFetch<GalleryData>(page, url)
+  }))
 }
 
 // ── Search ────────────────────────────────────────────────────────────────────
 
 async function fetchGalleries(query: string): Promise<Gallery[]> {
   const q = encodeURIComponent(`${query} language:english`)
-  // Use the search page as landing (sets CF cookies even when it shows the notice page)
-  return withPage(`${BASE}/search/?q=${q}`, async (page) => {
-    const data = await apiFetch<SearchResponse>(page, `${API}/search?query=${q}&page=1`)
-    return (data.result ?? []).map((g) => ({
-      id: g.id,
-      title: g.english_title ?? g.japanese_title ?? `Gallery ${g.id}`,
-    }))
-  })
+  const url = `${API}/search?query=${q}&page=1`
+  // Browser fallback lands on the search page first (sets CF cookies even when it shows the notice page)
+  const data = await directOr(url, () =>
+    withPage(`${BASE}/search/?q=${q}`, (page) => apiFetch<SearchResponse>(page, url)))
+  return (data.result ?? []).map((g) => ({
+    id: g.id,
+    title: g.english_title ?? g.japanese_title ?? `Gallery ${g.id}`,
+  }))
 }
 
 // ── Source Plugin Protocol ────────────────────────────────────────────────────

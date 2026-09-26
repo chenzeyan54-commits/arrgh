@@ -1,6 +1,13 @@
-import { api, type SearchResult } from './api'
+import { untrack } from 'svelte'
+import { api, type SearchResult, type SourceInfo, type SourceStatus } from './api'
 import { router } from './router.svelte'
 import { ROUTES } from './routes'
+
+const SEARCHING = 'searching'
+const DISCOVERY_FAILED = 'Discovery failed. Check your connection or server status.'
+const SEARCH_FAILED = 'Search failed. Is the server running?'
+
+export type SourceProgress = { status: typeof SEARCHING | SourceStatus; count?: number }
 
 export class DiscoverStore {
   query = $state('')
@@ -11,11 +18,12 @@ export class DiscoverStore {
   searchError = $state<string | null>(null)
   contentTypeFilter = $state<string | undefined>(undefined)
 
-  /** True for ~700ms after results arrive — show SearchProgress in completed state. */
+  /** Queried sources, from the stream's `sources` event (server-owned list). */
+  sources = $state<SourceInfo[]>([])
+  sourceState = $state<Map<string, SourceProgress>>(new Map())
+  /** True while searching and for ~700ms after `done`, so the settled pills stay visible briefly. */
   showProgress = $state(false)
-  /** Sources that contributed results; defined only when showProgress is true. */
-  completedSources = $state<Set<string> | undefined>(undefined)
-  #prevFetching = false
+  #gen = 0
 
   added = $state<Map<string, string>>(new Map())
   addError = $state<string | null>(null)
@@ -36,39 +44,57 @@ export class DiscoverStore {
     $effect(() => {
       const q = this.#submitted
       if (!q) return
+      const gen = ++this.#gen
+      const ctrl = new AbortController()
+      let collapse: ReturnType<typeof setTimeout> | undefined
       this.isFetching = true
+      this.showProgress = true
       this.searchError = null
-      this.completedSources = undefined
       this.contentTypeFilter = undefined
-      api
-        .searchManga(q)
-        .then((r) => {
-          this.data = r
-          this.searchError = null
+      this.data = undefined
+      this.sources = []
+      this.sourceState = new Map()
+
+      const finish = (error: string | null) => {
+        this.isFetching = false
+        this.searchError = error
+        collapse = setTimeout(() => (this.showProgress = false), 700)
+      }
+
+      // untrack: event handlers read state (sourceState, isFetching) and may run
+      // synchronously; they must not become dependencies of this effect.
+      untrack(() => api
+        .searchMangaStream(
+          q,
+          (e) => {
+            if (gen !== this.#gen) return
+            if (e.type === 'sources') {
+              this.sources = e.sources
+              this.sourceState = new Map(e.sources.map((s) => [s.key, { status: SEARCHING }]))
+            } else if (e.type === 'source') {
+              this.sourceState = new Map(this.sourceState).set(e.key, { status: e.status, count: e.count })
+              this.data = e.results
+            } else {
+              finish(e.ok ? null : DISCOVERY_FAILED)
+            }
+          },
+          ctrl.signal,
+        )
+        .then(() => {
+          // Stream closed without a `done` event (connection dropped).
+          if (gen === this.#gen && this.isFetching) finish(this.data ? null : SEARCH_FAILED)
         })
         .catch((err: unknown) => {
+          if (gen !== this.#gen || ctrl.signal.aborted) return
           const msg = err instanceof Error ? err.message : ''
-          this.searchError = msg.includes('502')
-            ? 'Discovery failed. Check your connection or server status.'
-            : 'Search failed. Is the server running?'
-        })
-        .finally(() => (this.isFetching = false))
-    })
+          finish(msg.includes('502') ? DISCOVERY_FAILED : SEARCH_FAILED)
+        }))
 
-    // When fetch completes with results, briefly show the green-pill "done" state before
-    // revealing the results list — gives the user a clear signal which sources responded.
-    $effect(() => {
-      const fetching = this.isFetching
-      const data = this.data
-      if (this.#prevFetching && !fetching && data && data.length > 0) {
-        const sources = new Set(data.map((r) => r.source))
-        this.completedSources = sources
-        this.showProgress = true
-        this.#prevFetching = false
-        const t = setTimeout(() => (this.showProgress = false), 700)
-        return () => clearTimeout(t)
+      // New search or leaving the page: stop reading the old stream.
+      return () => {
+        ctrl.abort()
+        clearTimeout(collapse)
       }
-      this.#prevFetching = fetching
     })
   }
 

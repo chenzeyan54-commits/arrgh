@@ -1,5 +1,5 @@
 use axum::Router;
-use tower_http::trace::TraceLayer;
+use tower_http::trace::{DefaultMakeSpan, TraceLayer};
 
 use crate::state::AppState;
 
@@ -35,6 +35,11 @@ pub fn router(state: AppState) -> Router {
         .nest("/api/queue", queue::routes())
         .nest("/api/media", media::routes())
         .nest("/api/plugins", plugins::routes())
-        .layer(TraceLayer::new_for_http())
+        // INFO-level span so failure lines (`response failed … 502`) carry the
+        // method + URI at the default log level — without it they're undiagnosable.
+        .layer(
+            TraceLayer::new_for_http()
+                .make_span_with(DefaultMakeSpan::new().level(tracing::Level::INFO)),
+        )
         .with_state(state)
 }

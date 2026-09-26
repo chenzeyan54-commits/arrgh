@@ -83,6 +83,26 @@ const ctx: PluginContext = {
   logger: console,
 }
 
+/** Which plugin id each loaded bundle file registered — so a removed file can be unloaded. */
+const bundleFileIds = new Map<string, string>()
+
+/** Watcher event: (re)load a changed bundle file, or unload it if the file was removed (spec 020). */
+export async function onBundleChange(
+  registry: Map<string, PluginBundle>,
+  communitySet: Set<string>,
+  file: string,
+  isCommunity: boolean,
+): Promise<void> {
+  const abs = path.resolve(file)
+  if (fs.existsSync(abs)) return loadBundle(registry, communitySet, abs, isCommunity)
+  const id = bundleFileIds.get(abs)
+  if (!id) return
+  bundleFileIds.delete(abs)
+  registry.delete(id)
+  communitySet.delete(id)
+  console.log(`[plugin-host] unloaded: ${id} (bundle removed)`)
+}
+
 async function loadBundle(
   registry: Map<string, PluginBundle>,
   communitySet: Set<string>,
@@ -96,6 +116,7 @@ async function loadBundle(
     const bundle: PluginBundle = require(abs)
     if (bundle.init) await bundle.init(ctx)
     registry.set(bundle.info.id, bundle)
+    bundleFileIds.set(abs, bundle.info.id)
     if (isCommunity) communitySet.add(bundle.info.id)
     console.log(`[plugin-host] loaded: ${bundle.info.id} (${bundle.info.name})${isCommunity ? ' [community]' : ''}`)
   } catch (e) {
@@ -122,7 +143,7 @@ function watchBundles(): void {
     if (!fs.existsSync(dir)) continue
     fs.watch(dir, (_event, filename) => {
       if (filename && filename.endsWith('.js')) {
-        loadBundle(plugins, communityIds, path.join(dir, filename), isCommunity).catch(console.error)
+        onBundleChange(plugins, communityIds, path.join(dir, filename), isCommunity).catch(console.error)
       }
     })
   }
@@ -296,7 +317,9 @@ export function createApp(
 
 // ── Boot ──────────────────────────────────────────────────────────────────────
 
-loadAll().then(() => {
+// Tests import createApp from this module; don't also boot a real host
+// (it would load real bundles and collide with a running dev host on :PORT).
+if (!process.env.VITEST) loadAll().then(() => {
   watchBundles()
   const app = createApp(plugins, communityIds)
   app.listen(PORT, () => {

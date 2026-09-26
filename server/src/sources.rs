@@ -1,6 +1,6 @@
 //! `external_sources` table access (ADR 0033, S3 #125). Port of the data
 //! half of `Api/Sources.cs`, plus (S10 #132) `Program.cs`'s startup seed of
-//! the 9 bundled sources — the only thing left to boot a fresh install.
+//! the 11 bundled sources — the only thing left to boot a fresh install.
 
 use sqlx::{FromRow, SqlitePool};
 use time::macros::format_description;
@@ -151,11 +151,15 @@ pub async fn insert_community_source(
 
 /// `(source_key, name, content_types, default_explicit, priority)` — exact
 /// values `Program.cs` used to seed a fresh install.
-const DEFAULT_SOURCES: [(&str, &str, &str, bool, i64); 9] = [
+const DEFAULT_SOURCES: [(&str, &str, &str, bool, i64); 11] = [
     ("mangadex", "MangaDex", "manga,manhua,one-shot", false, 10),
     ("mangapill", "Mangapill", "manga", false, 20),
     ("toonily", "Toonily", "manhwa", false, 30),
+    // ADR 0034: ahead of NovelFull — direct fetch, no CloakBrowser needed.
+    ("royalroad", "Royal Road", "novel", false, 35),
     ("novelfull", "NovelFull", "novel", false, 40),
+    // Spec 027: same site on another domain, different catalog (e.g. The Primal Hunter).
+    ("novelfullnet", "NovelFull.net", "novel", false, 45),
     ("nhentai", "nhentai", "hentai", true, 50),
     (
         "mangafire",
@@ -211,8 +215,18 @@ pub async fn seed_defaults_if_empty(
 mod tests {
     use super::*;
 
+    #[test]
+    fn default_sources_include_royalroad_before_novelfull() {
+        assert!(DEFAULT_SOURCES.contains(&("royalroad", "Royal Road", "novel", false, 35)));
+    }
+
+    #[test]
+    fn default_sources_include_novelfullnet_after_novelfull() {
+        assert!(DEFAULT_SOURCES.contains(&("novelfullnet", "NovelFull.net", "novel", false, 45)));
+    }
+
     #[tokio::test]
-    async fn seed_defaults_inserts_nine_sources_once() {
+    async fn seed_defaults_inserts_eleven_sources_once() {
         let pool = crate::state::connect_db(&format!(
             "{}/arrgh-seed-test-{}.db",
             std::env::temp_dir().display(),
@@ -228,7 +242,7 @@ mod tests {
             .fetch_one(&pool)
             .await
             .unwrap();
-        assert_eq!(count, 9);
+        assert_eq!(count, 11);
 
         // Second call is a no-op — table is no longer empty.
         seed_defaults_if_empty(&pool, "http://plugin-host:4000")
@@ -238,6 +252,6 @@ mod tests {
             .fetch_one(&pool)
             .await
             .unwrap();
-        assert_eq!(count_again, 9);
+        assert_eq!(count_again, 11);
     }
 }

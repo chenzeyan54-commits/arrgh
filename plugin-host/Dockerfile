@@ -14,6 +14,8 @@ COPY plugins/asurascans/package.json   ./plugins/asurascans/
 COPY plugins/wuxiaworld/package.json   ./plugins/wuxiaworld/
 COPY plugins/novelupdates/package.json ./plugins/novelupdates/
 COPY plugins/manga18fx/package.json    ./plugins/manga18fx/
+COPY plugins/royalroad/package.json    ./plugins/royalroad/
+COPY plugins/novelfullnet/package.json ./plugins/novelfullnet/
 COPY plugin-host/package.json          ./plugin-host/
 RUN npm ci
 
@@ -56,6 +58,8 @@ COPY --from=bundles /build/plugins/asurascans/bundles/asurascans.js     ./bundle
 COPY --from=bundles /build/plugins/wuxiaworld/bundles/wuxiaworld.js     ./bundles/
 COPY --from=bundles /build/plugins/novelupdates/bundles/novelupdates.js ./bundles/
 COPY --from=bundles /build/plugins/manga18fx/bundles/manga18fx.js       ./bundles/
+COPY --from=bundles /build/plugins/royalroad/bundles/royalroad.js       ./bundles/
+COPY --from=bundles /build/plugins/novelfullnet/bundles/novelfullnet.js ./bundles/
 ENV PORT=4000 LANGUAGES=en CLOAKBROWSER_WS_URL=
 EXPOSE 4000
 CMD ["node", "dist/index.js"]

@@ -223,3 +223,29 @@ describe('rewriteCdpHost', () => {
     expect(result).toBe('ws://cloakbrowser:3000/devtools/browser/uuid-here/path')
   })
 })
+
+// ── Bundle watcher (spec 020): removed bundle files are unloaded ──────────────
+
+import { onBundleChange } from './index'
+import * as fsm from 'node:fs'
+import * as os from 'node:os'
+import * as pathm from 'node:path'
+
+describe('onBundleChange', () => {
+  it('loads a new bundle file, and unloads it when the file is removed', async () => {
+    const dir = fsm.mkdtempSync(pathm.join(os.tmpdir(), 'bundles-'))
+    const file = pathm.join(dir, 'tmpplugin.js')
+    fsm.writeFileSync(file, `module.exports = { info: { id: 'tmpplugin', name: 'Tmp', content_types: ['manga'] } }`)
+    const registry = new Map<string, PluginBundle>()
+    const community = new Set<string>()
+
+    await onBundleChange(registry, community, file, true)
+    expect(registry.has('tmpplugin')).toBe(true)
+    expect(community.has('tmpplugin')).toBe(true)
+
+    fsm.unlinkSync(file)
+    await onBundleChange(registry, community, file, true)
+    expect(registry.has('tmpplugin')).toBe(false)
+    expect(community.has('tmpplugin')).toBe(false)
+  })
+})

@@ -18,6 +18,7 @@ use axum::http::{Request, StatusCode};
 use axum::Router;
 use http_body_util::BodyExt;
 use serde_json::{json, Value};
+use std::time::{Duration, Instant};
 use tower::ServiceExt; // oneshot
 
 async fn send(
@@ -539,4 +540,611 @@ async fn add_no_source_match_sets_sync_warning() {
         .await
         .unwrap();
     assert_eq!(warnings, 1);
+}
+
+// ── Royal Road — English-original novels (ADR 0034, spec 019) ────────────
+
+const RR_SEARCH_BODY: &str = r#"[{
+  "id": "36049",
+  "title": "The Primal Hunter",
+  "description": "On just another normal Monday, the world changed.",
+  "cover_url": "https://www.royalroadcdn.com/public/covers-full/36049-the-primal-hunter.jpg",
+  "status": "ongoing",
+  "author": null,
+  "year": null,
+  "tags": "LitRPG, Progression"
+}]"#;
+
+async fn wait_ready(state: &arrgh_server::state::AppState, title_id: &str) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let status: String = sqlx::query_scalar("SELECT sync_status FROM titles WHERE id = ?")
+            .bind(title_id)
+            .fetch_one(&state.db)
+            .await
+            .unwrap();
+        if status == "ready" || std::time::Instant::now() > deadline {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+    }
+}
+
+#[tokio::test]
+async fn search_includes_royalroad_novel_result() {
+    static ROUTES: [(&str, u16, &str); 1] = [("/royalroad/search", 200, RR_SEARCH_BODY)];
+    let mock = common::start_mock_routes(&ROUTES).await;
+    let state = common::build_discover_state(&mock).await;
+    let user = common::seed_user(&state, "member", "member", false).await;
+    let token = common::token_for(&user);
+    let app = arrgh_server::api::router(state);
+
+    let (status, body) = send(
+        &app,
+        "GET",
+        "/api/discover?q=the%20primal%20hunter",
+        Some(&token),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let rr = body
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["source"] == "royalroad")
+        .expect("royalroad result present");
+    assert_eq!(rr["mangaupdates_id"], "36049");
+    assert_eq!(rr["title"], "The Primal Hunter");
+    assert_eq!(rr["content_type"], "novel");
+    assert_eq!(rr["is_explicit"], false);
+    assert!(rr["description"]
+        .as_str()
+        .unwrap()
+        .contains("normal Monday"));
+    assert_eq!(rr["tags"], "LitRPG, Progression");
+}
+
+#[tokio::test]
+async fn search_royalroad_failure_does_not_fail_request() {
+    static ROUTES: [(&str, u16, &str); 2] = [
+        ("/royalroad/search", 500, "boom"),
+        (
+            "/novelupdates/search",
+            200,
+            r#"[{"id":"issth","title":"I Shall Seal the Heavens"}]"#,
+        ),
+    ];
+    let mock = common::start_mock_routes(&ROUTES).await;
+    let state = common::build_discover_state(&mock).await;
+    let user = common::seed_user(&state, "member", "member", false).await;
+    let token = common::token_for(&user);
+    let app = arrgh_server::api::router(state);
+
+    let (status, body) = send(&app, "GET", "/api/discover?q=issth", Some(&token), None).await;
+    assert_eq!(status, StatusCode::OK);
+    let arr = body.as_array().unwrap();
+    assert!(arr.iter().any(|r| r["source"] == "novelupdates"));
+    assert!(!arr.iter().any(|r| r["source"] == "royalroad"));
+}
+
+#[tokio::test]
+async fn search_dedup_prefers_novelupdates_over_royalroad() {
+    static ROUTES: [(&str, u16, &str); 2] = [
+        ("/royalroad/search", 200, RR_SEARCH_BODY),
+        (
+            "/novelupdates/search",
+            200,
+            r#"[{"id":"the-primal-hunter","title":"The Primal Hunter"}]"#,
+        ),
+    ];
+    let mock = common::start_mock_routes(&ROUTES).await;
+    let state = common::build_discover_state(&mock).await;
+    let user = common::seed_user(&state, "member", "member", false).await;
+    let token = common::token_for(&user);
+    let app = arrgh_server::api::router(state);
+
+    let (_, body) = send(
+        &app,
+        "GET",
+        "/api/discover?q=the%20primal%20hunter",
+        Some(&token),
+        None,
+    )
+    .await;
+    let hits: Vec<&Value> = body
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|r| r["title"] == "The Primal Hunter")
+        .collect();
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0]["source"], "novelupdates");
+}
+
+#[tokio::test]
+async fn add_royalroad_title_stores_source_fetches_author_and_syncs_chapters() {
+    static ROUTES: [(&str, u16, &str); 3] = [
+        (
+            "/royalroad/manga/36049/meta",
+            200,
+            r#"{"description":"desc","cover_url":null,"author":"Zogarth","chapter_count":2,"tags":"LitRPG"}"#,
+        ),
+        ("/royalroad/search", 200, RR_SEARCH_BODY),
+        (
+            "/royalroad/manga/36049/chapters",
+            200,
+            r#"[{"source_id":"fiction/36049/x/chapter/1/chapter-1","number":1,"chapter_format":"text"},
+                {"source_id":"fiction/36049/x/chapter/2/chapter-1389","number":1389,"chapter_format":"text"}]"#,
+        ),
+    ];
+    let mock = common::start_mock_routes(&ROUTES).await;
+    let state = common::build_state_with_plugin_host(&mock).await;
+    common::seed_source_with_key(&state, "Royal Road", "royalroad", "novel").await;
+    let user = common::seed_user(&state, "member", "member", false).await;
+    let token = common::token_for(&user);
+    let app = arrgh_server::api::router(state.clone());
+
+    let (status, body) = send(
+        &app,
+        "POST",
+        "/api/discover/add",
+        Some(&token),
+        Some(json!({
+            "title": "The Primal Hunter",
+            "source": "royalroad",
+            "source_id": "36049",
+            "content_type": "novel",
+            "status": "ongoing"
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let title_id = body["id"].as_str().unwrap().to_string();
+    wait_ready(&state, &title_id).await;
+
+    let (src, src_id, author, mu): (String, String, Option<String>, Option<String>) = sqlx::query_as(
+        "SELECT metadata_source, metadata_source_id, author, mangaupdates_id FROM titles WHERE id = ?",
+    )
+    .bind(&title_id)
+    .fetch_one(&state.db)
+    .await
+    .unwrap();
+    assert_eq!(src, "royalroad");
+    assert_eq!(src_id, "36049");
+    assert_eq!(author.as_deref(), Some("Zogarth"));
+    assert_eq!(mu, None);
+
+    let links: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM title_sources WHERE title_id = ? AND source = 'royalroad'",
+    )
+    .bind(&title_id)
+    .fetch_one(&state.db)
+    .await
+    .unwrap();
+    assert_eq!(links, 1);
+
+    let numbers: Vec<f64> = sqlx::query_scalar(
+        "SELECT number FROM chapters WHERE title_id = ? AND chapter_format = 'text' ORDER BY number",
+    )
+    .bind(&title_id)
+    .fetch_all(&state.db)
+    .await
+    .unwrap();
+    assert_eq!(numbers, vec![1.0, 1389.0]);
+}
+
+/// FR-009 regression: Royal Road returning nothing for an East Asian title
+/// must not raise a Sync Warning (the ADR 0024 noise).
+#[tokio::test]
+async fn royalroad_no_results_adds_no_sync_warning() {
+    static ROUTES: [(&str, u16, &str); 3] = [
+        ("/royalroad/search", 200, "[]"),
+        (
+            "/novelfull/search",
+            200,
+            r#"[{"id":"issth","title":"I Shall Seal the Heavens"}]"#,
+        ),
+        ("/novelfull/manga/issth/chapters", 200, "[]"),
+    ];
+    let mock = common::start_mock_routes(&ROUTES).await;
+    let state = common::build_state_with_plugin_host(&mock).await;
+    common::seed_source_with_key(&state, "Royal Road", "royalroad", "novel").await;
+    common::seed_source_with_key(&state, "NovelFull", "novelfull", "novel").await;
+    let user = common::seed_user(&state, "member", "member", false).await;
+    let token = common::token_for(&user);
+    let app = arrgh_server::api::router(state.clone());
+
+    let (_, body) = send(
+        &app,
+        "POST",
+        "/api/discover/add",
+        Some(&token),
+        Some(json!({
+            "title": "I Shall Seal the Heavens",
+            "source": "novelupdates",
+            "source_id": "issth",
+            "content_type": "novel",
+            "status": "complete"
+        })),
+    )
+    .await;
+    let title_id = body["id"].as_str().unwrap().to_string();
+    wait_ready(&state, &title_id).await;
+
+    let warnings: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sync_warnings WHERE title_id = ?")
+        .bind(&title_id)
+        .fetch_one(&state.db)
+        .await
+        .unwrap();
+    assert_eq!(warnings, 0);
+    let log: String = sqlx::query_scalar(
+        "SELECT COALESCE(group_concat(message, ' | '), '') FROM sync_log WHERE title_id = ?",
+    )
+    .bind(&title_id)
+    .fetch_one(&state.db)
+    .await
+    .unwrap_or_default();
+    assert!(log.contains("No results from royalroad"), "sync log: {log}");
+}
+
+/// Web-client body shape: `DiscoverStore.handleAdd` sends the authority id as
+/// `mangaupdates_id` for every source. A non-MU id must not land in
+/// `titles.mangaupdates_id` (refresh-metadata would fetch an unrelated MU
+/// series) nor dedup against a MU title that happens to share the number.
+#[tokio::test]
+async fn add_royalroad_web_shape_does_not_treat_id_as_mangaupdates() {
+    let mock = common::start_mock_plugin_host("[]", false).await;
+    let state = common::build_state_with_plugin_host(&mock).await;
+    let mu_title = common::seed_title(&state, "Some Manga", false).await;
+    common::set_mangaupdates_id(&state, &mu_title, "36049").await;
+    let user = common::seed_user(&state, "member", "member", false).await;
+    let token = common::token_for(&user);
+    let app = arrgh_server::api::router(state.clone());
+
+    let (status, body) = send(
+        &app,
+        "POST",
+        "/api/discover/add",
+        Some(&token),
+        Some(json!({
+            "mangaupdates_id": "36049",
+            "source": "royalroad",
+            "title": "The Primal Hunter",
+            "content_type": "novel",
+            "status": "ongoing"
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let id = body["id"].as_str().unwrap().to_string();
+    assert_ne!(id, mu_title, "merged into an unrelated MangaUpdates title");
+
+    let (meta_source, meta_source_id, mu_id): (Option<String>, Option<String>, Option<String>) =
+        sqlx::query_as(
+            "SELECT metadata_source, metadata_source_id, mangaupdates_id FROM titles WHERE id = ?",
+        )
+        .bind(&id)
+        .fetch_one(&state.db)
+        .await
+        .unwrap();
+    assert_eq!(meta_source.as_deref(), Some("royalroad"));
+    assert_eq!(meta_source_id.as_deref(), Some("36049"));
+    assert_eq!(mu_id, None);
+}
+
+/// Spec 021 US3: every leg (one-shot too) is bounded by the configured
+/// per-source timeout — all legs hung → 502 promptly instead of hanging.
+#[tokio::test]
+async fn oneshot_bounded_by_source_timeout() {
+    static ROUTES: [(&str, u16, &str); 1] = [("/royalroad/search", 200, RR_SEARCH_BODY)];
+    let mock = common::start_mock_routes_slow(&ROUTES, &["*"], Duration::from_secs(2)).await;
+    let state = common::build_discover_state_with_timeout(&mock, Duration::from_millis(300)).await;
+    let user = common::seed_user(&state, "member", "member", false).await;
+    let token = common::token_for(&user);
+    let app = arrgh_server::api::router(state);
+
+    let started = Instant::now();
+    let (status, _) = send(&app, "GET", "/api/discover?q=x", Some(&token), None).await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
+    assert!(
+        started.elapsed() < Duration::from_millis(1500),
+        "took {:?}",
+        started.elapsed()
+    );
+}
+
+// ── GET /api/discover/stream — live per-source progress (spec 021) ───────
+
+/// Reads the NDJSON body incrementally, timestamping each line relative to
+/// the request start.
+async fn stream(
+    app: &Router,
+    uri: &str,
+    token: Option<&str>,
+) -> (StatusCode, Vec<(Duration, Value)>) {
+    let mut builder = Request::builder().method("GET").uri(uri);
+    if let Some(t) = token {
+        builder = builder.header("authorization", format!("Bearer {t}"));
+    }
+    let started = Instant::now();
+    let res = app
+        .clone()
+        .oneshot(builder.body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    let status = res.status();
+    let mut body = res.into_body();
+    let (mut buf, mut lines) = (String::new(), Vec::new());
+    while let Some(frame) = body.frame().await {
+        if let Ok(data) = frame.unwrap().into_data() {
+            buf.push_str(std::str::from_utf8(&data).unwrap());
+            while let Some(nl) = buf.find('\n') {
+                let line: String = buf.drain(..=nl).collect();
+                lines.push((
+                    started.elapsed(),
+                    serde_json::from_str(line.trim()).unwrap(),
+                ));
+            }
+        }
+    }
+    (status, lines)
+}
+
+fn source_event<'a>(lines: &'a [(Duration, Value)], key: &str) -> &'a (Duration, Value) {
+    lines
+        .iter()
+        .find(|(_, e)| e["type"] == "source" && e["key"] == key)
+        .unwrap_or_else(|| panic!("no source event for {key}"))
+}
+
+const MEMBER_SOURCES: [&str; 6] = [
+    "mangaupdates",
+    "anilist",
+    "mangadex",
+    "novelupdates",
+    "wuxiaworld",
+    "royalroad",
+];
+
+#[tokio::test]
+async fn stream_lists_sources_then_one_event_per_source_then_done() {
+    static ROUTES: [(&str, u16, &str); 1] = [("/royalroad/search", 200, RR_SEARCH_BODY)];
+    let mock = common::start_mock_routes(&ROUTES).await;
+    let state = common::build_discover_state(&mock).await;
+    let user = common::seed_user(&state, "member", "member", false).await;
+    let token = common::token_for(&user);
+    let app = arrgh_server::api::router(state);
+
+    let (status, lines) = stream(&app, "/api/discover/stream?q=primal", Some(&token)).await;
+    assert_eq!(status, StatusCode::OK);
+    let events: Vec<&Value> = lines.iter().map(|(_, e)| e).collect();
+
+    assert_eq!(events[0]["type"], "sources");
+    let keys: Vec<&str> = events[0]["sources"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s["key"].as_str().unwrap())
+        .collect();
+    assert_eq!(keys, MEMBER_SOURCES);
+    assert_eq!(events[0]["sources"][5]["label"], "Royal Road");
+
+    let sources: Vec<&&Value> = events.iter().filter(|e| e["type"] == "source").collect();
+    assert_eq!(sources.len(), 6);
+    for e in &sources {
+        assert!(["found", "empty", "error", "timeout"].contains(&e["status"].as_str().unwrap()));
+    }
+    assert_eq!(source_event(&lines, "royalroad").1["status"], "found");
+    assert_eq!(source_event(&lines, "royalroad").1["count"], 1);
+
+    assert_eq!(events.last().unwrap()["type"], "done");
+    assert_eq!(events.last().unwrap()["ok"], true);
+    assert_eq!(events.len(), 8);
+}
+
+#[tokio::test]
+async fn stream_explicit_user_includes_nhentai() {
+    let mock = common::start_mock_routes(&[]).await;
+    let state = common::build_discover_state(&mock).await;
+    let admin = common::seed_user(&state, "admin", "admin", true).await;
+    let token = common::token_for(&admin);
+    let app = arrgh_server::api::router(state);
+
+    let (_, lines) = stream(&app, "/api/discover/stream?q=x", Some(&token)).await;
+    let sources = lines[0].1["sources"].as_array().unwrap();
+    assert_eq!(sources.len(), 7);
+    assert_eq!(sources[6]["key"], "nhentai");
+    assert_eq!(
+        lines.iter().filter(|(_, e)| e["type"] == "source").count(),
+        7
+    );
+}
+
+#[tokio::test]
+async fn stream_reports_timeout_status() {
+    static ROUTES: [(&str, u16, &str); 2] = [
+        ("/royalroad/search", 200, RR_SEARCH_BODY),
+        (
+            "/novelupdates/search",
+            200,
+            r#"[{"id":"issth","title":"I Shall Seal the Heavens"}]"#,
+        ),
+    ];
+    let mock =
+        common::start_mock_routes_slow(&ROUTES, &["/novelupdates/search"], Duration::from_secs(2))
+            .await;
+    let state = common::build_discover_state_with_timeout(&mock, Duration::from_millis(300)).await;
+    let user = common::seed_user(&state, "member", "member", false).await;
+    let token = common::token_for(&user);
+    let app = arrgh_server::api::router(state);
+
+    let started = Instant::now();
+    let (_, lines) = stream(&app, "/api/discover/stream?q=x", Some(&token)).await;
+    assert!(
+        started.elapsed() < Duration::from_millis(1500),
+        "took {:?}",
+        started.elapsed()
+    );
+
+    let nu = &source_event(&lines, "novelupdates").1;
+    assert_eq!(nu["status"], "timeout");
+    assert_eq!(nu["count"], 0);
+    assert_eq!(source_event(&lines, "royalroad").1["status"], "found");
+    assert_eq!(lines.last().unwrap().1, json!({"type": "done", "ok": true}));
+}
+
+#[tokio::test]
+async fn stream_all_failed_done_not_ok() {
+    let mock = common::start_mock_plugin_host("boom", true).await; // 500 everywhere
+    let state = common::build_discover_state(&mock).await;
+    let user = common::seed_user(&state, "member", "member", false).await;
+    let token = common::token_for(&user);
+    let app = arrgh_server::api::router(state);
+
+    let (status, lines) = stream(&app, "/api/discover/stream?q=x", Some(&token)).await;
+    assert_eq!(status, StatusCode::OK);
+    let sources: Vec<&Value> = lines
+        .iter()
+        .map(|(_, e)| e)
+        .filter(|e| e["type"] == "source")
+        .collect();
+    assert_eq!(sources.len(), 6);
+    assert!(sources.iter().all(|e| e["status"] == "error"));
+    assert_eq!(
+        lines.last().unwrap().1,
+        json!({"type": "done", "ok": false})
+    );
+}
+
+#[tokio::test]
+async fn stream_unauthorized() {
+    let mock = common::start_mock_routes(&[]).await;
+    let app = arrgh_server::api::router(common::build_discover_state(&mock).await);
+    let (status, _) = send(&app, "GET", "/api/discover/stream?q=x", None, None).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn stream_fast_source_event_arrives_before_slow_source_finishes() {
+    static ROUTES: [(&str, u16, &str); 2] = [
+        ("/royalroad/search", 200, RR_SEARCH_BODY),
+        (
+            "/novelupdates/search",
+            200,
+            r#"[{"id":"issth","title":"I Shall Seal the Heavens"}]"#,
+        ),
+    ];
+    let mock = common::start_mock_routes_slow(
+        &ROUTES,
+        &["/novelupdates/search"],
+        Duration::from_millis(1500),
+    )
+    .await;
+    let state = common::build_discover_state_with_timeout(&mock, Duration::from_secs(5)).await;
+    let user = common::seed_user(&state, "member", "member", false).await;
+    let token = common::token_for(&user);
+    let app = arrgh_server::api::router(state);
+
+    let (_, lines) = stream(&app, "/api/discover/stream?q=x", Some(&token)).await;
+    let (rr_at, rr) = source_event(&lines, "royalroad");
+    let (nu_at, nu) = source_event(&lines, "novelupdates");
+    assert!(
+        *rr_at < Duration::from_secs(1),
+        "royalroad arrived at {rr_at:?}"
+    );
+    assert!(
+        *nu_at >= Duration::from_millis(1400),
+        "novelupdates arrived at {nu_at:?}"
+    );
+    assert_eq!(rr["status"], "found");
+    assert_eq!(nu["status"], "found");
+}
+
+#[tokio::test]
+async fn stream_final_results_equal_one_shot() {
+    static ROUTES: [(&str, u16, &str); 3] = [
+        ("/series/search", 200, MU_BODY),
+        ("/royalroad/search", 200, RR_SEARCH_BODY),
+        (
+            "/novelupdates/search",
+            200,
+            r#"[{"id":"the-primal-hunter","title":"The Primal Hunter"}]"#,
+        ),
+    ];
+    let mock = common::start_mock_routes(&ROUTES).await;
+    let state = common::build_discover_state(&mock).await;
+    let user = common::seed_user(&state, "member", "member", false).await;
+    let token = common::token_for(&user);
+    let app = arrgh_server::api::router(state);
+
+    let (_, one_shot) = send(&app, "GET", "/api/discover?q=x", Some(&token), None).await;
+    let (_, lines) = stream(&app, "/api/discover/stream?q=x", Some(&token)).await;
+    let last = lines
+        .iter()
+        .rev()
+        .find(|(_, e)| e["type"] == "source")
+        .unwrap();
+    assert!(one_shot.as_array().unwrap().len() >= 2);
+    assert_eq!(last.1["results"], one_shot);
+}
+
+/// MangaDex answers 400 to requests without a User-Agent — the shared HTTP
+/// client must send one by default (found via the spec 021 source pills).
+#[tokio::test]
+async fn shared_http_client_sends_a_user_agent() {
+    use axum::http::HeaderMap;
+    use axum::response::IntoResponse;
+
+    let app = axum::Router::new().fallback(|headers: HeaderMap| async move {
+        if headers.get("user-agent").is_some_and(|v| !v.is_empty()) {
+            (
+                StatusCode::OK,
+                [("content-type", "application/json")],
+                r#"{"result":"ok","data":[]}"#,
+            )
+                .into_response()
+        } else {
+            StatusCode::BAD_REQUEST.into_response()
+        }
+    });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let mock = format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+    let state = common::build_discover_state(&mock).await;
+    let user = common::seed_user(&state, "member", "member", false).await;
+    let token = common::token_for(&user);
+    let app = arrgh_server::api::router(state);
+
+    let (_, lines) = stream(&app, "/api/discover/stream?q=berserk", Some(&token)).await;
+    assert_eq!(source_event(&lines, "mangadex").1["status"], "empty");
+}
+
+/// Spec 029: NovelUpdates Series Finder rows carry a synopsis — Discover must
+/// pass it through instead of dropping it.
+#[tokio::test]
+async fn search_novelupdates_description_passed_through() {
+    static ROUTES: [(&str, u16, &str); 1] = [(
+        "/novelupdates/search",
+        200,
+        r#"[{"id":"reverend-insanity","title":"Reverend Insanity","description":"Human beings are the very spirit of all life.","cover_url":null,"status":"unknown"}]"#,
+    )];
+    let mock = common::start_mock_routes(&ROUTES).await;
+    let state = common::build_discover_state(&mock).await;
+    let user = common::seed_user(&state, "member", "member", false).await;
+    let token = common::token_for(&user);
+    let app = arrgh_server::api::router(state);
+
+    let (_, body) = send(&app, "GET", "/api/discover?q=reverend", Some(&token), None).await;
+    let nu = body
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["source"] == "novelupdates")
+        .expect("novelupdates result");
+    assert_eq!(
+        nu["description"],
+        "Human beings are the very spirit of all life."
+    );
 }

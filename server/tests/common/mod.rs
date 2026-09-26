@@ -34,6 +34,23 @@ pub async fn build_discover_state(mock_url: &str) -> AppState {
     .await
 }
 
+/// `build_discover_state` with a short per-source Discover timeout, so
+/// timeout tests run in milliseconds instead of `DISCOVER_SOURCE_TIMEOUT`.
+pub async fn build_discover_state_with_timeout(
+    mock_url: &str,
+    timeout: std::time::Duration,
+) -> AppState {
+    build_state_with(|c| {
+        c.plugin_host_url = mock_url.to_string();
+        c.mangaupdates_url = mock_url.to_string();
+        c.anilist_url = mock_url.to_string();
+        c.mangadex_meta_url = mock_url.to_string();
+        c.wuxiaworld_meta_url = mock_url.to_string();
+        c.discover_source_timeout = timeout;
+    })
+    .await
+}
+
 /// Points `plugin_host_url` + `download_dir` at test-local values (S7 #129
 /// downloader tests — need a mock plugin-host and a throwaway download dir).
 pub async fn build_downloader_state(plugin_host_url: &str, download_dir: &str) -> AppState {
@@ -117,6 +134,46 @@ pub async fn start_mock_source_match_host(
                 ([("content-type", "application/json")], chapters_body).into_response()
             }),
         );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    format!("http://{addr}")
+}
+
+/// Exact-path router mock: each `(path, status, body)` answers its path
+/// (query string ignored); every other path 404s. For tests where several
+/// authorities/plugins share one mock URL but must answer differently.
+pub async fn start_mock_routes(routes: &'static [(&'static str, u16, &'static str)]) -> String {
+    start_mock_routes_slow(routes, &[], std::time::Duration::ZERO).await
+}
+
+/// `start_mock_routes`, but each of `slow_paths` sleeps `delay` before
+/// answering (`"*"` = every path) — stands in for a hung upstream (per-leg
+/// timeout tests).
+pub async fn start_mock_routes_slow(
+    routes: &'static [(&'static str, u16, &'static str)],
+    slow_paths: &'static [&'static str],
+    delay: std::time::Duration,
+) -> String {
+    use axum::http::{StatusCode, Uri};
+    use axum::response::IntoResponse;
+
+    let app = axum::Router::new().fallback(move |uri: Uri| async move {
+        if slow_paths.iter().any(|p| *p == "*" || *p == uri.path()) {
+            tokio::time::sleep(delay).await;
+        }
+        match routes.iter().find(|(p, _, _)| *p == uri.path()) {
+            Some((_, status, body)) => (
+                StatusCode::from_u16(*status).unwrap(),
+                [("content-type", "application/json")],
+                *body,
+            )
+                .into_response(),
+            None => StatusCode::NOT_FOUND.into_response(),
+        }
+    });
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {

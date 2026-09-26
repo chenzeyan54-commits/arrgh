@@ -121,9 +121,18 @@ describe('SearchRow', () => {
     expect(img!.src).toContain('cdn.example.com')
   })
 
-  it('renders cover placeholder (pulse skeleton) when no cover_url', () => {
+  it('renders a static cover placeholder (not a loading pulse) when no cover_url', () => {
     const { container } = render(SearchRow, baseProps())
     expect(container.querySelector('img')).toBeNull()
-    expect(container.querySelector('.animate-pulse')).toBeTruthy()
+    expect(container.querySelector('[data-testid="cover-placeholder"]')).toBeTruthy()
+    expect(container.querySelector('.animate-pulse')).toBeNull()
+  })
+
+  // Results never fill in a missing description later (e.g. NovelUpdates search
+  // has none), so a pulsing skeleton looked like a card stuck loading forever.
+  it('renders nothing (no loading skeleton) when description is missing', () => {
+    const { container } = render(SearchRow, baseProps({ result: makeResult({ description: null }) }))
+    expect(container.querySelector('.animate-pulse')).toBeNull()
+    expect(container.querySelector('p.line-clamp-3')).toBeNull()
   })
 })

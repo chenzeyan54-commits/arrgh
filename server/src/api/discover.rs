@@ -3,10 +3,20 @@
 //! (superseded by nhentai) and isn't ported — see `crate::metadata`'s module
 //! doc.
 
+use std::convert::Infallible;
+use std::future::Future;
+use std::time::{Duration, Instant};
+
+use axum::body::Body;
 use axum::extract::{Query, State};
+use axum::http::header;
+use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
-use serde::Deserialize;
+use futures::future::{join_all, BoxFuture};
+use futures::stream::{FuturesUnordered, StreamExt};
+use futures::FutureExt;
+use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 
 use crate::api::titles::TitleDto;
@@ -20,6 +30,7 @@ use crate::titles;
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/", get(search))
+        .route("/stream", get(search_stream))
         .route("/trending/manga", get(trending_manga))
         .route("/trending/manhwa", get(trending_manhwa))
         .route("/trending/manhua", get(trending_manhua))
@@ -34,76 +45,143 @@ struct SearchQuery {
     q: String,
 }
 
+/// Per-source bound on every Discover search leg (spec 021). Generous on
+/// purpose: nhentai legitimately takes ~20–60 s and streaming means a slow
+/// source no longer delays the others — this only stops a hung one from
+/// holding the search open forever. The shared `reqwest::Client` has no
+/// timeout of its own.
+pub const DISCOVER_SOURCE_TIMEOUT: Duration = Duration::from_secs(90);
+
+enum LegError {
+    Timeout,
+    Failed(anyhow::Error),
+}
+
+async fn bounded<T>(
+    limit: Duration,
+    leg: impl Future<Output = anyhow::Result<T>>,
+) -> Result<T, LegError> {
+    match tokio::time::timeout(limit, leg).await {
+        Ok(Ok(v)) => Ok(v),
+        Ok(Err(e)) => Err(LegError::Failed(e)),
+        Err(_) => Err(LegError::Timeout),
+    }
+}
+
+type LegResult = Result<Vec<DiscoverResult>, LegError>;
+
+struct Leg {
+    key: &'static str,
+    label: &'static str,
+    fut: BoxFuture<'static, LegResult>,
+}
+
+/// The Discover fan-out, one entry per queried authority in `AUTHORITY_ORDER`.
+/// nhentai is only included for explicit-enabled users.
+fn legs(state: &AppState, q: &str, allow_explicit: bool) -> Vec<Leg> {
+    let cfg = &state.config;
+    let limit = cfg.discover_source_timeout;
+    let http = || state.http.clone();
+    let q = || q.to_string();
+    let leg = |key, label, fut: BoxFuture<'static, anyhow::Result<Vec<DiscoverResult>>>| Leg {
+        key,
+        label,
+        fut: bounded(limit, fut).boxed(),
+    };
+    let mut legs = vec![
+        leg(
+            "mangaupdates",
+            "MangaUpdates",
+            search_mu(http(), cfg.mangaupdates_url.clone(), q()).boxed(),
+        ),
+        leg(
+            "anilist",
+            "AniList",
+            search_anilist(http(), cfg.anilist_url.clone(), q(), allow_explicit).boxed(),
+        ),
+        leg(
+            "mangadex",
+            "MangaDex",
+            search_mangadex(http(), cfg.mangadex_meta_url.clone(), q()).boxed(),
+        ),
+        leg(
+            "novelupdates",
+            "NovelUpdates",
+            search_novelupdates(http(), cfg.plugin_host_url.clone(), q()).boxed(),
+        ),
+        leg(
+            "wuxiaworld",
+            "WuxiaWorld",
+            search_wuxiaworld(http(), cfg.wuxiaworld_meta_url.clone(), q()).boxed(),
+        ),
+        leg(
+            discover::ROYALROAD,
+            "Royal Road",
+            search_royalroad(http(), cfg.plugin_host_url.clone(), q()).boxed(),
+        ),
+    ];
+    if allow_explicit {
+        legs.push(leg(
+            "nhentai",
+            "nhentai",
+            search_nhentai(http(), cfg.plugin_host_url.clone(), q()).boxed(),
+        ));
+    }
+    legs
+}
+
+/// Fire-and-forget cover-cache seeding for MU results — mirrors
+/// `SeedAndCacheCoverAsync`. .NET re-fetches MU here (redundant network
+/// call); reusing the already-mapped results instead, same output.
+fn seed_mu_covers(state: &AppState, mu_results: &[DiscoverResult]) {
+    for r in mu_results {
+        if let Some(cover) = r.cover_url.clone() {
+            let db = state.db.clone();
+            let http = state.http.clone();
+            let title = r.title.clone();
+            let download_dir = state.config.download_dir.clone();
+            let source_id = r.mangaupdates_id.clone();
+            tokio::spawn(async move {
+                discover::seed_and_cache_cover(
+                    &db,
+                    &http,
+                    &title,
+                    &cover,
+                    &download_dir,
+                    "mangaupdates",
+                    &source_id,
+                )
+                .await;
+            });
+        }
+    }
+}
+
 async fn search(
     claims: Claims,
     State(state): State<AppState>,
     Query(query): Query<SearchQuery>,
 ) -> AppResult<Json<Vec<DiscoverResult>>> {
-    let cfg = &state.config;
-    let http = &state.http;
-    let q = &query.q;
-    let allow_explicit = claims.allow_explicit;
-
-    let (mu, al, md, nu, ww, nh) = tokio::join!(
-        search_mu(http, &cfg.mangaupdates_url, q),
-        search_anilist(http, &cfg.anilist_url, q, allow_explicit),
-        search_mangadex(http, &cfg.mangadex_meta_url, q),
-        search_novelupdates(http, &cfg.plugin_host_url, q),
-        search_wuxiaworld(http, &cfg.wuxiaworld_meta_url, q),
-        async {
-            if allow_explicit {
-                search_nhentai(http, &cfg.plugin_host_url, q).await
-            } else {
-                anyhow::bail!("nhentai not queried — non-explicit user")
-            }
-        },
-    );
+    let outcomes = join_all(
+        legs(&state, &query.q, claims.allow_explicit)
+            .into_iter()
+            .map(|l| async move { (l.key, l.fut.await) }),
+    )
+    .await;
 
     let mut raw = Vec::new();
     let mut any_succeeded = false;
-    for v in [
-        mu.as_ref(),
-        al.as_ref(),
-        md.as_ref(),
-        nu.as_ref(),
-        ww.as_ref(),
-        nh.as_ref(),
-    ]
-    .into_iter()
-    .filter_map(|r| r.ok())
-    {
-        any_succeeded = true;
-        raw.extend(v.iter().cloned());
+    for (key, outcome) in outcomes {
+        if let Ok(v) = outcome {
+            any_succeeded = true;
+            if key == "mangaupdates" {
+                seed_mu_covers(&state, &v);
+            }
+            raw.extend(v);
+        }
     }
     if !any_succeeded {
         return Err(AppError::BadGateway);
-    }
-
-    // Fire-and-forget cover-cache seeding for MU results — mirrors
-    // `SeedAndCacheCoverAsync`. .NET re-fetches MU here (redundant network
-    // call); reusing the already-mapped results instead, same output.
-    if let Ok(mu_results) = &mu {
-        for r in mu_results {
-            if let Some(cover) = r.cover_url.clone() {
-                let db = state.db.clone();
-                let http = state.http.clone();
-                let title = r.title.clone();
-                let download_dir = cfg.download_dir.clone();
-                let source_id = r.mangaupdates_id.clone();
-                tokio::spawn(async move {
-                    discover::seed_and_cache_cover(
-                        &db,
-                        &http,
-                        &title,
-                        &cover,
-                        &download_dir,
-                        "mangaupdates",
-                        &source_id,
-                    )
-                    .await;
-                });
-            }
-        }
     }
 
     let merged = discover::merge_fan_out(raw);
@@ -111,52 +189,186 @@ async fn search(
     Ok(Json(results))
 }
 
+// ── GET /stream — same fan-out, NDJSON per-source progress (spec 021) ────
+
+#[derive(Serialize)]
+struct SourceInfo {
+    key: &'static str,
+    label: &'static str,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "lowercase")]
+enum LegStatus {
+    Found,
+    Empty,
+    Error,
+    Timeout,
+}
+
+#[derive(Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum StreamEvent {
+    Sources {
+        sources: Vec<SourceInfo>,
+    },
+    Source {
+        key: &'static str,
+        status: LegStatus,
+        count: usize,
+        ms: u64,
+        /// Full merged list so far — same shape as `GET /api/discover`.
+        results: Vec<DiscoverResult>,
+    },
+    Done {
+        ok: bool,
+    },
+}
+
+async fn search_stream(
+    claims: Claims,
+    State(state): State<AppState>,
+    Query(query): Query<SearchQuery>,
+) -> Response {
+    let legs = legs(&state, &query.q, claims.allow_explicit);
+    let sources = legs
+        .iter()
+        .map(|l| SourceInfo {
+            key: l.key,
+            label: l.label,
+        })
+        .collect();
+    let started = Instant::now();
+    let mut pending: FuturesUnordered<_> = legs
+        .into_iter()
+        .enumerate()
+        .map(|(i, l)| async move { (i, l.key, l.fut.await) })
+        .collect();
+    let mut slots: Vec<Option<Vec<DiscoverResult>>> = (0..pending.len()).map(|_| None).collect();
+
+    let (tx, rx) = futures::channel::mpsc::unbounded::<Result<String, Infallible>>();
+    // A failed send means the client went away — returning drops `pending`,
+    // which cancels the remaining legs.
+    let send = move |e: StreamEvent| {
+        let line = serde_json::to_string(&e).expect("serializable event") + "\n";
+        tx.unbounded_send(Ok(line)).is_ok()
+    };
+    tokio::spawn(async move {
+        if !send(StreamEvent::Sources { sources }) {
+            return;
+        }
+        let mut any_succeeded = false;
+        let mut results = Vec::new();
+        while let Some((i, key, outcome)) = pending.next().await {
+            let ms = started.elapsed().as_millis() as u64;
+            let (status, count) = match &outcome {
+                Ok(v) if v.is_empty() => (LegStatus::Empty, 0),
+                Ok(v) => (LegStatus::Found, v.len()),
+                Err(LegError::Timeout) => (LegStatus::Timeout, 0),
+                Err(LegError::Failed(e)) => {
+                    tracing::debug!("discover: {key} failed: {e:#}");
+                    (LegStatus::Error, 0)
+                }
+            };
+            if let Ok(v) = outcome {
+                any_succeeded = true;
+                if key == "mangaupdates" {
+                    seed_mu_covers(&state, &v);
+                }
+                slots[i] = Some(v);
+                // Leg order, not completion order, so the settled list is
+                // identical to the one-shot endpoint's.
+                let raw = slots.iter().flatten().flatten().cloned().collect();
+                match enrich_and_check_library(
+                    &state.db,
+                    &claims.user_id,
+                    discover::merge_fan_out(raw),
+                )
+                .await
+                {
+                    Ok(r) => results = r,
+                    Err(e) => tracing::warn!("discover stream: library check failed: {e:?}"),
+                }
+            }
+            let event = StreamEvent::Source {
+                key,
+                status,
+                count,
+                ms,
+                results: results.clone(),
+            };
+            if !send(event) {
+                return;
+            }
+        }
+        send(StreamEvent::Done { ok: any_succeeded });
+    });
+
+    (
+        [
+            (header::CONTENT_TYPE, "application/x-ndjson"),
+            (header::HeaderName::from_static("x-accel-buffering"), "no"),
+        ],
+        Body::from_stream(rx),
+    )
+        .into_response()
+}
+
 async fn search_mu(
-    http: &reqwest::Client,
-    base: &str,
-    q: &str,
+    http: reqwest::Client,
+    base: String,
+    q: String,
 ) -> anyhow::Result<Vec<DiscoverResult>> {
-    let series = metadata::mangaupdates::search(http, base, q).await?;
+    let series = metadata::mangaupdates::search(&http, &base, &q).await?;
     Ok(discover::filter_mu_scope(
         series.into_iter().map(mu_to_result).collect(),
     ))
 }
 
 async fn search_anilist(
-    http: &reqwest::Client,
-    endpoint: &str,
-    q: &str,
+    http: reqwest::Client,
+    endpoint: String,
+    q: String,
     allow_explicit: bool,
 ) -> anyhow::Result<Vec<DiscoverResult>> {
-    let series = metadata::anilist::search(http, endpoint, q, allow_explicit).await?;
+    let series = metadata::anilist::search(&http, &endpoint, &q, allow_explicit).await?;
     Ok(series.into_iter().map(anilist_to_result).collect())
 }
 
 async fn search_mangadex(
-    http: &reqwest::Client,
-    base: &str,
-    q: &str,
+    http: reqwest::Client,
+    base: String,
+    q: String,
 ) -> anyhow::Result<Vec<DiscoverResult>> {
-    let series = metadata::mangadex::search(http, base, q).await?;
+    let series = metadata::mangadex::search(&http, &base, &q).await?;
     Ok(series.into_iter().map(mangadex_to_result).collect())
 }
 
 async fn search_novelupdates(
-    http: &reqwest::Client,
-    plugin_host_url: &str,
-    q: &str,
+    http: reqwest::Client,
+    plugin_host_url: String,
+    q: String,
 ) -> anyhow::Result<Vec<DiscoverResult>> {
-    let series = metadata::novelupdates::search(http, plugin_host_url, q).await?;
+    let series = metadata::novelupdates::search(&http, &plugin_host_url, &q).await?;
     Ok(series.into_iter().map(novelupdates_to_result).collect())
 }
 
 async fn search_wuxiaworld(
-    http: &reqwest::Client,
-    base: &str,
-    q: &str,
+    http: reqwest::Client,
+    base: String,
+    q: String,
 ) -> anyhow::Result<Vec<DiscoverResult>> {
-    let series = metadata::wuxiaworld::search(http, base, q).await?;
+    let series = metadata::wuxiaworld::search(&http, &base, &q).await?;
     Ok(series.into_iter().map(wuxiaworld_to_result).collect())
+}
+
+async fn search_royalroad(
+    http: reqwest::Client,
+    plugin_host_url: String,
+    q: String,
+) -> anyhow::Result<Vec<DiscoverResult>> {
+    let series = metadata::royalroad::search(&http, &plugin_host_url, &q).await?;
+    Ok(series.into_iter().map(royalroad_to_result).collect())
 }
 
 #[derive(Deserialize)]
@@ -166,14 +378,14 @@ struct PluginSearchResult {
 }
 
 async fn search_nhentai(
-    http: &reqwest::Client,
-    plugin_host_url: &str,
-    q: &str,
+    http: reqwest::Client,
+    plugin_host_url: String,
+    q: String,
 ) -> anyhow::Result<Vec<DiscoverResult>> {
     let url = format!(
         "{}/nhentai/search?q={}",
         plugin_host_url.trim_end_matches('/'),
-        urlencoding::encode(q)
+        urlencoding::encode(&q)
     );
     let resp = http.get(&url).send().await?.error_for_status()?;
     let results: Vec<PluginSearchResult> = resp.json().await?;
@@ -255,6 +467,7 @@ fn novelupdates_to_result(s: metadata::novelupdates::NovelUpdatesSeries) -> Disc
     DiscoverResult {
         mangaupdates_id: s.source_id,
         title: s.title,
+        description: s.description,
         cover_url: s.cover_url,
         status: s.status,
         content_type: "novel".to_string(),
@@ -272,6 +485,20 @@ fn wuxiaworld_to_result(s: metadata::wuxiaworld::WuxiaWorldSeries) -> DiscoverRe
         author: s.author,
         content_type: "novel".to_string(),
         source: "wuxiaworld".to_string(),
+        ..Default::default()
+    }
+}
+
+fn royalroad_to_result(s: metadata::royalroad::RoyalRoadSeries) -> DiscoverResult {
+    DiscoverResult {
+        mangaupdates_id: s.source_id,
+        title: s.title,
+        description: s.description,
+        cover_url: s.cover_url,
+        status: s.status,
+        tags: s.tags,
+        content_type: "novel".to_string(),
+        source: discover::ROYALROAD.to_string(),
         ..Default::default()
     }
 }
@@ -455,12 +682,20 @@ async fn add(
         .clone()
         .or_else(|| body.mangaupdates_id.clone());
 
+    // The web client sends every authority's id as `mangaupdates_id`; only
+    // treat it as one when the source actually is MangaUpdates, or a Royal
+    // Road/AniList numeric id collides with an unrelated MU series.
+    let mu_id = body
+        .mangaupdates_id
+        .clone()
+        .filter(|_| meta_source.as_deref() == Some("mangaupdates"));
+
     let mut existing = None;
     if let (Some(src), Some(sid)) = (&meta_source, &meta_source_id) {
         existing = titles::find_id_by_metadata_source(&state.db, src, sid).await?;
     }
     if existing.is_none() {
-        if let Some(mu_id) = &body.mangaupdates_id {
+        if let Some(mu_id) = &mu_id {
             existing = titles::find_id_by_mangaupdates_id(&state.db, mu_id).await?;
         }
     }
@@ -494,7 +729,7 @@ async fn add(
             &state.db,
             &titles::NewTitle {
                 id: &id,
-                mangaupdates_id: body.mangaupdates_id.as_deref(),
+                mangaupdates_id: mu_id.as_deref(),
                 metadata_source: meta_source.as_deref(),
                 metadata_source_id: meta_source_id.as_deref(),
                 title: &clean_title,
@@ -602,6 +837,23 @@ fn spawn_add_manga_background(
                             &format!("Loaded {} synonym(s)", synonyms.len()),
                         )
                         .await;
+                    }
+                }
+            }
+            Some(discover::ROYALROAD) => {
+                titles::append_sync_log(&db, &title_id, "Fetching metadata from Royal Road…").await;
+                if let Some(id) = &meta_source_id {
+                    if let Ok(meta) = metadata::royalroad::meta(&http, &plugin_host_url, id).await {
+                        titles::coalesce_update_title(
+                            &db,
+                            &title_id,
+                            meta.description.as_deref(),
+                            meta.author.as_deref(),
+                            None,
+                            meta.tags.as_deref(),
+                        )
+                        .await
+                        .ok();
                     }
                 }
             }

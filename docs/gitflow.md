@@ -66,3 +66,19 @@ Config: `.claude/private-overlay.conf`. See `CLAUDE.md` → Git Workflow.
 Interactive and background sessions both work directly on the checked-out
 branch — no automatic worktree isolation (`.claude/settings*.json` sets
 `worktree.bgIsolation: none`).
+
+## Recovering from an amend after push
+
+If a commit already pushed to a remote branch gets `--amend`ed locally, the
+next `push` is rejected (non-fast-forward) — local and remote copies of that
+commit have diverged. Don't force-push to "fix" it unless the amend
+intentionally needs to overwrite what's public; usually the amend just
+folded in one more change that should've been its own commit. Undo it
+instead — no force-push needed:
+
+```bash
+git log --oneline -1 origin/<branch>   # the commit that's actually public
+git reset --soft <that-commit-sha>     # rewinds HEAD to it; working tree/index untouched
+git commit -m "the extra change"       # what got folded in via amend, now its own commit
+git push                                # fast-forwards cleanly — no --force
+```

@@ -11,10 +11,12 @@
     "plugins/asurascans",
     "plugins/wuxiaworld",
     "plugins/novelupdates",
-    "plugins/manga18fx"
+    "plugins/manga18fx",
+    "plugins/royalroad",
+    "plugins/novelfullnet"
   ],
   "scripts": {
-    "build:plugins": "npm run build -w plugins/mangadex -w plugins/toonily -w plugins/novelfull -w plugins/mangapill -w plugins/nhentai -w plugins/asurascans -w plugins/wuxiaworld -w plugins/novelupdates -w plugins/manga18fx",
+    "build:plugins": "npm run build -w plugins/mangadex -w plugins/toonily -w plugins/novelfull -w plugins/mangapill -w plugins/nhentai -w plugins/asurascans -w plugins/wuxiaworld -w plugins/novelupdates -w plugins/manga18fx -w plugins/royalroad -w plugins/novelfullnet",
     "build:web": "npm run build --prefix web"
   }
 }

@@ -34,9 +34,11 @@ Legend: ✅ exists · 🟡 partial (some red TDD) · ⬜ planned · 🔴 known f
 | Library | `useLibrary` | fetch, totalPages, remove, removingId, syncing poll, sort default+setSort refetches, toggleContentType add/remove/resets page, toggleStatus add/remove, hasFilters, clearFilters, fetches with filter params, showFiltersl | ✅ |
 | Library | `MangaCard` | render, remove button, is_explicit=true→18+ pill shown, is_explicit=false→no 18+ pill | ✅ |
 | Discover | `useDiscover` | submit, blank guard, navigate, added tracking, source field, addingId lifecycle, addError, contentTypeFilter, filteredData, availableTypes (6 TDD ⬜) | 🟡 |
-| Discover | `SearchRow` | render, is_explicit=true→18+ badge shown, is_explicit=false→no 18+ badge, tag-based inference blocked, loading state, In Library, cover/skeleton | ✅ |
+| Discover | `SearchRow` | render, is_explicit=true→18+ badge shown, is_explicit=false→no 18+ badge, tag-based inference blocked, loading state, In Library, cover; missing cover → static placeholder + missing description → nothing (no fake loading pulse, spec 028) | ✅ |
 | Discover | `ContentTypeFilter` | render, hentai pill, novel pill, onChange (2 TDD ⬜) | 🟡 |
-| Discover | `SearchProgress` | searching: heading, skeletons, pills stagger in; completed: "Results from…" heading, no skeletons, all pills visible immediately, matched→green after stagger, unmatched→dimmed, dot green+no-pulse | ✅ |
+| Discover | `SearchProgress` (spec 021) | renders exactly the server-provided sources (no hard-coded list), searching→pulsing violet, found→green + count, empty→grey "no results", error/timeout→amber with title, "Searching sources…"/"Results from…" heading, skeletons only when asked | ✅ |
+| Discover | `DiscoverStore` streaming (spec 021) | `sources` event → all searching; first `source` event shows results while still fetching, later ones replace; `done{ok:false}` → discovery-failed error; new submit aborts the old stream + ignores its late events (generation guard); leaving the page aborts | ✅ |
+| Discover | `splitNdjson` (`lib/api.test.ts`, spec 021) | complete lines parsed, trailing partial held until the next chunk, blank lines ignored | ✅ |
 | Home | `useHome` | loads trending on mount, filters in-library, trendingLoading lifecycle | ✅ |
 | Home | `Cards` | render variants, title+author below cover, error→emoji, is_explicit=true→18+ pill shown (TrendingCard + LibraryCoverCard), is_explicit=false→no 18+ pill | ✅ |
 | Settings | `useSettings` | load, tab defaults, save, logout | ✅ |
@@ -94,10 +96,10 @@ Framework: plain `#[test]`/`#[tokio::test]` inline in the module under test. Run
 | `queue.rs` | `is_allowed_explicit` |
 | `settings.rs` | Numeric/bool parsing, trending clamp, reader-mode validation |
 | `media.rs` | `detect_content_type`, `strip_jpeg_icc`, `is_image`, `root_domain_referer`, `get_chapter_page` (dir + cbz) |
-| `discover.rs` | `normalize_title`, `designated_authority`, `deduplicate`, `merge_fan_out` (incl. nhentai word-boundary upgrade), `title_matches`/`levenshtein`, `strip_search_qualifier`, `is_hentai_tag`, `filter_mu_scope` |
-| `metadata/*.rs` | Per-authority response mapping (MangaUpdates, AniList, MangaDex, WuxiaWorld) |
+| `discover.rs` | `normalize_title`, `designated_authority`, `deduplicate`, `merge_fan_out` (incl. nhentai word-boundary upgrade), `title_matches`/`levenshtein`, `strip_search_qualifier`, `is_hentai_tag`, `filter_mu_scope`, Royal Road authority order + NU-wins dedup (spec 019) ✅ |
+| `metadata/*.rs` | Per-authority response mapping (MangaUpdates, AniList, MangaDex, WuxiaWorld, Royal Road — spec 019 ✅) |
 | `plugins.rs` | `fetch_index` (file:// + missing-file) |
-| `sources.rs` | `seed_defaults_if_empty` |
+| `sources.rs` | `seed_defaults_if_empty` (10 sources), `DEFAULT_SOURCES` includes royalroad @ priority 35 (spec 019) ✅ |
 | `update_checker.rs` | GitHub release JSON → `(version, html_url)` parsing |
 | `api/titles.rs`'s `patch_body_tests` | `PatchBody`'s tri-state `Option<Option<T>>` parsing for `reader_mode`/`download_dir` — absent vs. explicit `null` vs. a value are all distinguishable (an improvement over .NET's `JsonElement?`, which couldn't tell "absent" from "null" cleanly; see the module's doc comment) |
 
@@ -115,6 +117,9 @@ Framework: plain `#[test]`/`#[tokio::test]` inline in the module under test. Run
 | `queue.rs` | List/filter, admin-only clear-completed, owner-or-admin remove-or-cancel |
 | `downloader.rs` | Background worker: cbz/text download, multi-source priority fallback, `"downloading"` status while in flight, error messages include the failing URL, User-Agent header sent |
 | `settings.rs`, `sources.rs` | KV settings CRUD + validation, source list/patch/delete, seeded bundled-source content types |
+| `discover.rs` (Royal Road, spec 019) | Royal Road leg in search results, leg failure non-fatal, NovelUpdates wins dedup, add stores `metadata_source=royalroad` + author from plugin meta + text chapters numbered by real number, no Sync Warning when Royal Road has no match (FR-009), web-shaped add body (`mangaupdates_id` + non-MU `source`) never stored as / deduped against a MangaUpdates id ✅ |
+| `discover.rs` (live progress, spec 021) | `GET /api/discover/stream`: `sources` first (6 for members, nhentai 7th only for explicit users), one `source` event per leg, `done` last; timed-out leg → `status:"timeout"` while others still return; all legs failed → every event `error` + `done.ok=false`; 401 without token; a fast source's event arrives before a slow source finishes (incremental body read); last event's `results` == the one-shot response; one-shot `GET /api/discover` bounded by the same per-source timeout (all hung → 502 promptly); shared HTTP client sends a default User-Agent (MangaDex 400s without one); NovelUpdates description passed through (spec 029) ✅ |
+| `schema_bootstrap.rs` (spec 019) | Migration 0004 restores the royalroad source row on existing installs, no-op on empty table, idempotent ✅ |
 | `plugins.rs` | Index fetch, admin-gated install (404/409/422/502/201) and delete (404/403/204) |
 | `media.rs` | Covered by `media.rs`'s unit tests + a manual smoke check (no dedicated integration file — no auth on this route group to exercise) |
 | `logs.rs`, `version.rs` | Log buffer read + level PATCH, version + update-available reporting |
@@ -129,6 +134,8 @@ Vitest + supertest. `createApp(plugins, communityIds?)` exported from `index.ts`
 
 | Case | Status |
 |---|---|
+| `onBundleChange` → loads a new bundle file, unloads it when the file is removed (spec 020, #187) | ✅ |
+| importing `index.ts` under Vitest doesn't boot a real host (no EADDRINUSE with the dev stack up — spec 025, #183) | ✅ |
 | `GET /plugins` → returns all loaded plugins | ✅ |
 | `GET /plugins` → empty array when no plugins loaded | ✅ |
 | `GET /:plugin/info` → returns info for known plugin | ✅ |
@@ -174,6 +181,7 @@ Tests `info` shape and exported fn signatures for all bundled default plugins. N
 | asurascans | `['manhwa']` | no (pages) | ✅ |
 | wuxiaworld | `['novel']` | yes (chapterText, no pages) | ✅ |
 | manga18fx | `['manhwa']` | no (pages) | ✅ |
+| royalroad | `['novel']` | yes (search, meta, chapters, chapterText) — ADR 0034 | ✅ |
 
 ## Plugin Contract — Existing (`plugin-host/src/contract.test.ts`) — `novelupdates` added ✅
 
@@ -181,6 +189,9 @@ Tests `info` shape and exported fn signatures for all bundled default plugins. N
 |---|---|---|
 | novelupdates | id, default_explicit=false, content_types (novel), search+chapters exports, no pages | ✅ |
 | plugin-index consistency | novelupdates index.json includes novel | ✅ |
+| novelfullnet (spec 027) | id, name NovelFull.net, default_explicit=false, content_types (novel), search/meta/chapters/chapterText exports, bundled in plugin-index | ✅ |
+| production plugin set (spec 020) | Dockerfile COPY ids == `build:plugins` ids == index `bundled` ids, fixture excluded | ✅ |
+| plugin-index consistency | royalroad bundled novel entry present (flipped from the ADR 0024 "absent" guard) | ✅ |
 
 ## Plugin Behavior — New Plugins (`plugin-host/src/behavior.new-plugins.test.ts`) ✅ ADR 0031
 
@@ -196,7 +207,11 @@ HTML/JSON fixture tests for scraping logic. Each plugin tested with mocked respo
 | manga18fx | search URL is `/search?q=` not `/?s=` (WordPress fallback regression) | ✅ |
 | manga18fx | pages — lazy-load URLs match any `imgXX.manga18fx.com` CDN subdomain (not hardcoded to `img01`) | ✅ |
 | manga18fx | pages — mixed lazy+eager: some imgs have `data-src`, some have `src` only — all CDN URLs returned | ✅ |
-| novelupdates | `parseSearchHtml` — id/title/status/cover, multiple results, empty HTML, status mapping | ✅ |
+| novelupdates | `parseSearchHtml` on live Series Finder capture (id/title/cover, status unknown, empty HTML) + search URL assertion (spec 022); synopsis description incl. hidden remainder, no title/stats/genres/more-less (spec 029) | ✅ |
+| nhentai | direct v2 API first (search URL, chapters sorted by id, page URLs, no browser), empty result + 404 JSON never fall back, 403/non-JSON challenge → CloakBrowser fallback once, both fail → rejects — fixtures from live v2 API 2026-09-26 (spec 023) | ✅ |
+| novelfullnet | search (slug/title/absolute cover), chapter list with real numbers + positional fallback, chapters() collects every `/ajax-chapter-list?novelId=` page in one browser session, chapterText strips ad slot/scripts + throws on missing content, meta (summary/cover/genres/chapter count/novel id), search URL — fixtures from live site 2026-09-26 (spec 027) | ✅ |
+| royalroad (spec 029) | no-cover placeholder `/dist/img/nocover-new-min.png` → `cover_url: null` (search + meta), other relative covers made absolute | ✅ |
+| royalroad | search (id/title/cover/`#description-<id>`/tags, author null), meta author from `books:author`, STUB chapters numbered by real number `[1,2,1389]` + positional fallback, chapterText strips hidden anti-piracy spans, throws on missing content — fixtures from live site 2026-09-25 | ✅ |
 
 ---
 
@@ -316,6 +331,7 @@ API_USER=vinny API_PASS=... npm run test:update  # refresh discover snapshots
 | `library-flow.live.test.ts` | 8-step hentai flow: KayaNetori via nhentai (CloakBrowser) |
 | `library-flow-manhwa.live.test.ts` | 8-step manhwa flow: Solo Leveling via AsuraScans (no CF) |
 | `library-flow-novel.live.test.ts` | 8-step novel flow: ISSTH via WuxiaWorld (official API); text endpoint; 120s sync timeout |
+| `library-flow-royalroad.live.test.ts` | 8-step English-original flow: The Primal Hunter via Royal Road (authority + source); chapter 1389 keeps its number; text endpoint |
 | `sources.live.test.ts` | Sources list snapshot + nhentai=hentai assertion |
 | `discover.live.test.ts` | Discover search snapshots per content type (snapshot; update periodically) |
 

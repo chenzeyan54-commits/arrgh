@@ -13,7 +13,7 @@ pub struct Config {
     pub plugin_host_url: String,
     /// Bundled plugin index location (`PluginIndexUrl`) — `file://` or `http(s)://`.
     pub plugin_index_url: String,
-    /// Seed the 9 bundled `external_sources` on first boot unless explicitly
+    /// Seed the bundled `external_sources` on first boot unless explicitly
     /// disabled (`SeedDefaultSources=false`) — tests use this to start from
     /// an empty table. Port of `Program.cs`'s inline seed block.
     pub seed_default_sources: bool,
@@ -29,6 +29,9 @@ pub struct Config {
     pub download_dir: String,
     /// JWT signing secret (`JwtSecret`). Required from S2 on; optional now.
     pub jwt_secret: Option<String>,
+    /// Per-source Discover search bound. Deliberately not read from env —
+    /// always `DISCOVER_SOURCE_TIMEOUT`; only tests override it (spec 021).
+    pub discover_source_timeout: std::time::Duration,
 }
 
 impl Config {
@@ -57,6 +60,7 @@ impl Config {
             mangadex_meta_url: env_or("MANGADEX_META_URL", crate::metadata::mangadex::DEFAULT_BASE),
             wuxiaworld_meta_url: env_or("WUXIAWORLD_META_URL", "https://www.wuxiaworld.com"),
             jwt_secret,
+            discover_source_timeout: crate::api::discover::DISCOVER_SOURCE_TIMEOUT,
         })
     }
 }

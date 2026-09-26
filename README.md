@@ -12,7 +12,7 @@
 
 ## Features
 
-- **Discover** — fan-out search across 6 authorities: MangaUpdates (manga), AniList (manhwa), MangaDex (manhua), NovelUpdates + WuxiaWorld (novels), nhentai (hentai). Results deduplicated by authority precedence; animated source-chip progress while searching
+- **Discover** — fan-out search across 7 authorities: MangaUpdates (manga), AniList (manhwa), MangaDex (manhua), NovelUpdates + WuxiaWorld (translated novels), Royal Road (English-original novels), nhentai (hentai). Results deduplicated by authority precedence; live per-source progress, with results streaming in as each source answers
 - **Trending lanes** — Home screen shows 4 independent trending rows: Manga (MangaUpdates), Manhwa, Manhua, and Adult Manhwa (AniList); each lane caches independently
 - Title aliases from MangaUpdates associated names — improves cross-source matching for series with multiple romanisations
 - Chapters aggregated across all registered sources — completeness doesn't depend on any one source being up to date
@@ -99,7 +99,9 @@ All default sources compile into a single **plugin-host** container — no per-p
 | **AsuraScans** | Manhwa | `plugins/asurascans/` | |
 | **Manga18fx** | Manhwa (explicit) | `plugins/manga18fx/` | `default_explicit=true` |
 | **NovelFull** | Novel | `plugins/novelfull/` | CF-protected — uses CloakBrowser |
+| **NovelFull.net** | Novel | `plugins/novelfullnet/` | novelfull.net — same site, different catalog (e.g. The Primal Hunter); CF-protected — uses CloakBrowser |
 | **WuxiaWorld** | Novel | `plugins/wuxiaworld/` | Official API — no CF protection |
+| **Royal Road** | Novel (English originals) | `plugins/royalroad/` | Direct fetch — no CF protection; also a Discover authority |
 | **nhentai** | Hentai doujinshi | `plugins/nhentai/` | CF-protected — uses CloakBrowser; explicit-only source |
 
 CF-protected plugins route through the **CloakBrowser** sidecar (stealth Chromium, source-level fingerprint patches). Plugin Host holds the CDP connection; plugins call `ctx.getBrowser()` via `PluginContext`.
@@ -112,7 +114,7 @@ CF-protected plugins route through the **CloakBrowser** sidecar (stealth Chromiu
 
 ### Source Plugin Protocol
 
-Plugins are **download-only backends**. Metadata (search, descriptions, covers, trending) comes from the discover fan-out authorities (MangaUpdates, AniList, MangaDex, NovelUpdates, WuxiaWorld, nhentai) — plugins only need to serve chapter lists and page content.
+Plugins are **download-only backends**. Metadata (search, descriptions, covers, trending) comes from the discover fan-out authorities (MangaUpdates, AniList, MangaDex, NovelUpdates, WuxiaWorld, Royal Road, nhentai) — plugins only need to serve chapter lists and page content.
 
 Every plugin must implement:
 
@@ -146,6 +148,8 @@ arrgh/
     ├── mangapill/
     ├── toonily/
     ├── novelfull/
+    ├── royalroad/
+    ├── novelfullnet/
     ├── nhentai/
     └── manga18fx/
 ```
