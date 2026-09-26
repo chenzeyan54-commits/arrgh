@@ -438,3 +438,77 @@ async fn requests_include_user_agent_header() {
 
     let _ = std::fs::remove_dir_all(&tmp);
 }
+
+// ── download_workers concurrency (GH #160) ───────────────────────────────
+
+async fn count_downloading(pool: &sqlx::SqlitePool) -> i64 {
+    sqlx::query_scalar("SELECT COUNT(*) FROM download_queue WHERE status = 'downloading'")
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+/// Seeds two pending chapters behind a blocked image gate, sets
+/// `download_workers`, starts the loop, and returns the peak number of rows
+/// seen `downloading` at once over ~15 ticks before releasing the gate.
+async fn peak_concurrency(workers: i64) -> i64 {
+    let notify = Arc::new(Notify::new());
+    let (mock_url, _) = start_mock(1, Some(notify.clone())).await;
+    let tmp = std::env::temp_dir().join(format!("arrgh-dl-{}", uuid::Uuid::new_v4()));
+    let state = common::build_downloader_state(&mock_url, tmp.to_str().unwrap()).await;
+    arrgh_server::settings::set(&state.db, "download_workers", &workers.to_string())
+        .await
+        .unwrap();
+    let t = common::seed_title(&state, "Naruto", false).await;
+    let mut qids = Vec::new();
+    for n in [1.0, 2.0] {
+        let c = common::seed_chapter(&state, &t, n, false).await;
+        common::add_chapter_source(&state, &c, "mangadex").await;
+        qids.push(common::seed_queue_item(&state, &c, "Naruto", n, "pending", None).await);
+    }
+
+    tokio::spawn(arrgh_server::downloader::run_loop_with_interval(
+        state.db.clone(),
+        state.http.clone(),
+        state.config.plugin_host_url.clone(),
+        state.config.download_dir.clone(),
+        TICK,
+    ));
+
+    let mut peak = 0;
+    for _ in 0..15 {
+        peak = peak.max(count_downloading(&state.db).await);
+        tokio::time::sleep(TICK).await;
+    }
+
+    // Release every gated image until both items finish.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while count_downloading(&state.db).await > 0
+        || wait_for_status(&state.db, &qids[1], Duration::ZERO).await == "pending"
+    {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "downloads never drained"
+        );
+        notify.notify_waiters();
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    for q in &qids {
+        assert_eq!(
+            wait_for_status(&state.db, q, Duration::from_secs(5)).await,
+            "done"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&tmp);
+    peak
+}
+
+#[tokio::test]
+async fn download_workers_2_runs_two_items_concurrently() {
+    assert_eq!(peak_concurrency(2).await, 2);
+}
+
+#[tokio::test]
+async fn download_workers_1_runs_items_one_at_a_time() {
+    assert_eq!(peak_concurrency(1).await, 1);
+}

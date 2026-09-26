@@ -18,6 +18,8 @@ use sqlx::SqlitePool;
 use time::macros::format_description;
 use time::OffsetDateTime;
 
+use crate::settings;
+
 const USER_AGENT: &str = "arrgh-server/1.0";
 const TICK_INTERVAL: Duration = Duration::from_secs(3);
 
@@ -47,38 +49,68 @@ pub async fn run_loop_with_interval(
     download_dir: String,
     interval: Duration,
 ) {
+    let mut in_flight = tokio::task::JoinSet::new();
     loop {
-        if let Err(e) = tick(&pool, &http, &plugin_host_url, &download_dir).await {
+        while in_flight.try_join_next().is_some() {}
+        if let Err(e) = tick(
+            &pool,
+            &http,
+            &plugin_host_url,
+            &download_dir,
+            &mut in_flight,
+        )
+        .await
+        {
             tracing::debug!(error = ?e, "downloader tick error");
         }
         tokio::time::sleep(interval).await;
     }
 }
 
-/// Claims and processes one pending item, if any. No distributed lock —
-/// SQLite serialises writes and only one instance of this loop runs.
+/// Tops the in-flight set up to `download_workers` (re-read every tick, so a
+/// settings change applies without a restart) by claiming that many pending
+/// items in one statement and processing each on its own task. No
+/// distributed lock — SQLite serialises writes and only one loop runs.
 async fn tick(
     pool: &SqlitePool,
     http: &reqwest::Client,
     plugin_host_url: &str,
     download_dir: &str,
+    in_flight: &mut tokio::task::JoinSet<()>,
 ) -> anyhow::Result<()> {
-    let Some(id): Option<String> = sqlx::query_scalar(
-        "SELECT id FROM download_queue WHERE status = 'pending' ORDER BY created_at LIMIT 1",
+    let workers = settings::parse_long(
+        settings::get(pool, settings::DOWNLOAD_WORKERS)
+            .await?
+            .as_deref(),
+        settings::DEFAULT_DOWNLOAD_WORKERS,
     )
-    .fetch_optional(pool)
-    .await?
-    else {
+    .clamp(1, settings::MAX_DOWNLOAD_WORKERS) as usize;
+    let free = workers.saturating_sub(in_flight.len());
+    if free == 0 {
         return Ok(());
-    };
+    }
 
-    sqlx::query("UPDATE download_queue SET status = 'downloading', updated_at = ? WHERE id = ?")
-        .bind(ef_timestamp_now())
-        .bind(&id)
-        .execute(pool)
-        .await?;
+    let ids: Vec<String> = sqlx::query_scalar(
+        "UPDATE download_queue SET status = 'downloading', updated_at = ? \
+         WHERE id IN (SELECT id FROM download_queue WHERE status = 'pending' \
+                      ORDER BY created_at LIMIT ?) \
+         RETURNING id",
+    )
+    .bind(ef_timestamp_now())
+    .bind(free as i64)
+    .fetch_all(pool)
+    .await?;
 
-    process(pool, http, plugin_host_url, download_dir, &id).await
+    for id in ids {
+        let (pool, http) = (pool.clone(), http.clone());
+        let (plugin_host_url, download_dir) = (plugin_host_url.to_owned(), download_dir.to_owned());
+        in_flight.spawn(async move {
+            if let Err(e) = process(&pool, &http, &plugin_host_url, &download_dir, &id).await {
+                tracing::debug!(error = ?e, queue_id = %id, "download error");
+            }
+        });
+    }
+    Ok(())
 }
 
 #[derive(sqlx::FromRow)]
