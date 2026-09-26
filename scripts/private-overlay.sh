@@ -17,6 +17,15 @@
 #   scripts/private-overlay.sh commit [msg]    # stage the tracked paths + commit
 #   scripts/private-overlay.sh push            # push to the private remote (normal, non-forced)
 #   scripts/private-overlay.sh pull            # ff-only pull from the private remote
+#   scripts/private-overlay.sh restore         # re-checkout tracked paths missing from disk
+#
+# `pull` only applies the delta between old/new HEAD — a file unchanged in the
+# overlay's own history but deleted from disk out-of-band (a `git clean` on the
+# main repo, a stray `rm`, a branch switch that doesn't touch .private.git at
+# all) has nothing to fast-forward, so it silently never comes back. `status`
+# shows it as `D <path>` but nothing flags that as abnormal. `restore` is the
+# one-line fix: checks HEAD back out for exactly the tracked paths that are
+# gone. Safe to run any time — a no-op when nothing's actually missing.
 #
 # First-time population of an existing private remote you want to OVERWRITE
 # (e.g. migrating off the old symlink repo) is a deliberate manual step:
@@ -104,6 +113,19 @@ case "${1:-status}" in
   commit) shift; stage; p commit -m "${*:-overlay $(date -u +%FT%TZ)}" ;;
   push)   p push -u origin HEAD ;;
   pull)   p pull --ff-only origin "$(p rev-parse --abbrev-ref HEAD 2>/dev/null || echo main)" ;;
+  restore)
+    restored=""
+    for x in $PRIVATE_PATHS; do
+      if [ ! -e "$ROOT/$x" ] && p checkout HEAD -- "$x" 2>/dev/null; then
+        restored="$restored $x"
+      fi
+    done
+    if [ -z "$restored" ]; then
+      echo "private-overlay: nothing missing."
+    else
+      echo "private-overlay: restored:$restored"
+    fi
+    ;;
   gitignore) patch_gitignore; echo "private-overlay: .gitignore block regenerated." ;;
-  *) echo "usage: private-overlay.sh {init|status|commit [msg]|push|pull|gitignore}" >&2; exit 1 ;;
+  *) echo "usage: private-overlay.sh {init|status|commit [msg]|push|pull|restore|gitignore}" >&2; exit 1 ;;
 esac
